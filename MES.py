@@ -1,6 +1,6 @@
 from datetime import datetime, date
 from typing import List, Dict, Optional
-from tkinter import Tk, filedialog
+from tkinter import Tk, filedialog, messagebox
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -25,11 +25,6 @@ MES_FILE = filedialog.askopenfilename(
 )
 if not MES_FILE:
     raise SystemExit("MES 작업지시 엑셀을 선택하지 않았습니다.")
-
-TODAY_ACTUAL_FILE = filedialog.askopenfilename(
-    title="오늘 실적 엑셀 선택 (없으면 취소)",
-    filetypes=[("Excel files", "*.xlsx *.xls")]
-)
 
 OUTPUT_FILE = "./계획수량_작업지시_비교결과.xlsx"
 
@@ -299,7 +294,7 @@ def should_skip_row(product, process_name, sheet_title: str = "") -> bool:
     if product_txt.startswith("HH"):
         return True
 
-    if "클린칭C" in process_name_raw:
+    if sheet_title == "TANK공정(실적)" and "클린칭C" in process_name_raw:
         return True
 
     if "개발,기타" in process_name_raw:
@@ -862,15 +857,27 @@ def save_results(plan_df, mes_df, plan_base_df, compare_df, output_file: str):
 # 실행
 # =========================
 def main():
+    today_result_file = messagebox.askyesno("실적 적용 여부", "output.xlsx 같은 실적 파일을 불러와서\n작업지시 수량에 반영하시겠습니까?")
+    today_actual_file = None
+    if today_result_file:
+        today_actual_file = filedialog.askopenfilename(title="오늘 실적 파일 선택", filetypes=[("Excel files", "*.xlsx *.xls")])
+        if not today_actual_file:
+            print("오늘 실적 파일을 선택하지 않았습니다. 계속 진행합니다.")
+            today_actual_file = None
+    today_actual_df = extract_today_actual(today_actual_file)
+    print(f"[오늘 실적 정규화] {len(today_actual_df)}건")
+
+
     plan_df = extract_plan_all(PLAN_FILE)
     print(f"[계획 정규화] {len(plan_df)}건")
 
     mes_df = extract_mes(MES_FILE)
     print(f"[MES 정규화] {len(mes_df)}건")
 
-    today_actual_df = extract_today_actual(TODAY_ACTUAL_FILE)
-    print(f"[오늘 실적 정규화] {len(today_actual_df)}건")
+    
 
+
+   
     plan_base_df = build_plan_compare_base(plan_df)
     print(f"[계획 비교기준] {len(plan_base_df)}건")
 
