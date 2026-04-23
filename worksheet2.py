@@ -391,9 +391,28 @@ def main():
         wb = load_workbook(file_path, data_only=True)
 
         today_grouped = {}
-        if os.path.exists(OUTPUT_FILE):
-            today_df = pd.read_excel(OUTPUT_FILE)
-            if {"품번", "실적수량"}.issubset(today_df.columns):
+
+        use_result_file = messagebox.askyesno(
+            "실적 적용 여부",
+            "output.xlsx 같은 실적 파일을 불러와서\n작업지시 수량에 반영하시겠습니까?"
+        )
+
+        if use_result_file:
+            result_file = filedialog.askopenfilename(
+                title="실적 파일 선택",
+                filetypes=[("Excel files", "*.xlsx *.xls")]
+            )
+
+            if result_file:
+                today_df = pd.read_excel(result_file)
+
+                required_cols = {"품번", "실적수량"}
+                if not required_cols.issubset(today_df.columns):
+                    raise Exception(
+                        f"선택한 파일에 필요한 컬럼이 없습니다.\n"
+                        f"필요 컬럼: {sorted(required_cols)}"
+                    )
+
                 today_df = today_df[["품번", "실적수량"]].copy()
                 today_df["품번"] = today_df["품번"].astype(str).str.strip()
                 today_grouped = today_df.groupby("품번")["실적수량"].sum().to_dict()
