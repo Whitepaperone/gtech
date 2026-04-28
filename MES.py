@@ -1,6 +1,8 @@
 from datetime import datetime, date
 from typing import List, Dict, Optional
-from tkinter import Tk, filedialog, messagebox
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkcalendar import Calendar
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -9,7 +11,7 @@ from openpyxl import load_workbook
 # =========================
 # 파일 선택
 # =========================
-root = Tk()
+root = tk.Tk()
 root.withdraw()
 
 PLAN_FILE = filedialog.askopenfilename(
@@ -27,6 +29,7 @@ if not MES_FILE:
     raise SystemExit("MES 작업지시 엑셀을 선택하지 않았습니다.")
 
 OUTPUT_FILE = "./계획수량_작업지시_비교결과.xlsx"
+
 
 
 # =========================
@@ -123,6 +126,79 @@ def normalize_part_no(v: str) -> str:
     for ch in [" ", "_"]:
         t = t.replace(ch, "")
     return t
+
+
+def select_date_range(parent):
+    win = tk.Toplevel(parent)
+    win.title("비교 기간 선택")
+    win.geometry("620x330")
+    win.resizable(False, False)
+
+    selected = {"start": None, "end": None}
+
+    tk.Label(win, text="시작일").grid(row=0, column=0, padx=10, pady=(10, 0))
+    tk.Label(win, text="종료일").grid(row=0, column=1, padx=10, pady=(10, 0))
+
+    cal_start = Calendar(win, selectmode="day", date_pattern="yyyy-mm-dd")
+    cal_start.grid(row=1, column=0, padx=10, pady=10)
+
+    cal_end = Calendar(win, selectmode="day", date_pattern="yyyy-mm-dd")
+    cal_end.grid(row=1, column=1, padx=10, pady=10)
+
+    def confirm():
+        start = pd.to_datetime(cal_start.get_date()).normalize()
+        end = pd.to_datetime(cal_end.get_date()).normalize()
+
+        if start > end:
+            messagebox.showerror("오류", "시작일이 종료일보다 늦습니다.", parent=win)
+            return
+
+        selected["start"] = start
+        selected["end"] = end
+        win.destroy()
+
+    def no_filter():
+        selected["start"] = None
+        selected["end"] = None
+        win.destroy()
+
+    def on_close():
+        selected["start"] = None
+        selected["end"] = None
+        win.destroy()
+
+    tk.Button(win, text="확인", width=15, command=confirm).grid(row=2, column=0, pady=10)
+    tk.Button(win, text="기간 필터 없이 진행", width=20, command=no_filter).grid(row=2, column=1, pady=10)
+
+    win.protocol("WM_DELETE_WINDOW", on_close)
+
+    # 창이 뒤로 숨는 것 방지
+    win.update_idletasks()
+    win.lift()
+    win.attributes("-topmost", True)
+    win.after(300, lambda: win.attributes("-topmost", False))
+    win.focus_force()
+    win.grab_set()
+
+    parent.wait_window(win)
+
+    return selected["start"], selected["end"]
+
+
+def filter_by_period(df: pd.DataFrame, start_date=None, end_date=None) -> pd.DataFrame:
+    if df.empty or "날짜" not in df.columns:
+        return df
+
+    out = df.copy()
+    out["날짜"] = pd.to_datetime(out["날짜"], errors="coerce").dt.normalize()
+
+    if start_date is not None:
+        out = out[out["날짜"] >= start_date]
+
+    if end_date is not None:
+        out = out[out["날짜"] <= end_date]
+
+    return out.copy()
 
 
 def make_compare_key(process: str, workshop: str, team: str, part_no: str, day) -> str:
@@ -649,7 +725,6 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
     mes = mes_df.copy()
 
     key_cols = ["비교키", "공정", "작업장명", "작업반명", "품번", "날짜"]
-    group_cols = ["공정", "작업장명", "작업반명", "품번"]
 
     plan["날짜"] = pd.to_datetime(plan["날짜"], errors="coerce").dt.normalize()
     mes["날짜"] = pd.to_datetime(mes["날짜"], errors="coerce").dt.normalize()
@@ -857,6 +932,11 @@ def save_results(plan_df, mes_df, plan_base_df, compare_df, output_file: str):
 # 실행
 # =========================
 def main():
+    
+    START_DATE, END_DATE = select_date_range(root)
+
+    root.update()  # 날짜 선택 창이 닫힌 후에 업데이트
+
     today_result_file = messagebox.askyesno("실적 적용 여부", "output.xlsx 같은 실적 파일을 불러와서\n작업지시 수량에 반영하시겠습니까?")
     today_actual_file = None
     if today_result_file:
@@ -867,21 +947,19 @@ def main():
     today_actual_df = extract_today_actual(today_actual_file)
     print(f"[오늘 실적 정규화] {len(today_actual_df)}건")
 
-
     plan_df = extract_plan_all(PLAN_FILE)
+    plan_df = filter_by_period(plan_df, start_date=START_DATE, end_date=END_DATE)
     print(f"[계획 정규화] {len(plan_df)}건")
 
     mes_df = extract_mes(MES_FILE)
+    mes_df = filter_by_period(mes_df, start_date=START_DATE, end_date=END_DATE)
     print(f"[MES 정규화] {len(mes_df)}건")
 
-    
-
-
-   
     plan_base_df = build_plan_compare_base(plan_df)
     print(f"[계획 비교기준] {len(plan_base_df)}건")
 
     compare_df = compare_plan_vs_mes_detail(plan_df, mes_df, today_actual_df)
+    compare_df = filter_by_period(compare_df, start_date=START_DATE, end_date=END_DATE)
     print(f"[비교 결과] {len(compare_df)}건")
 
     save_results(plan_df, mes_df, plan_base_df, compare_df, OUTPUT_FILE)
