@@ -204,14 +204,6 @@ def extract_finish_plan_sheet(ws) -> pd.DataFrame:
         first_col_raw = get_merged_value(ws, r, 1)
         first_col_text = normalize_compact(first_col_raw)
 
-        # 완성공정 시트 내부의 다른 구역 스킵
-        if (
-            "용접C/M" in first_col_text
-            or "코어C/M" in first_col_text
-            or "선발주-용접C/M" in first_col_text
-        ):
-            continue
-
         compact_row = normalize_compact(row_text)
 
         # 액세서리 영역 처리
