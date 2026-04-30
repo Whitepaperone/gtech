@@ -220,7 +220,7 @@ def extract_finish_plan_sheet(ws) -> pd.DataFrame:
             continue
 
         if accessory_mode:
-            if first_col_text.startswith("단품"):
+            if first_col_text.startswith("제외"):
                 break
 
         finish_part_no = normalize_text(ws.cell(r, cols["finish_part_col"]).value)
