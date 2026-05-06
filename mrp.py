@@ -8,18 +8,23 @@ OUTPUT_FILE = "./output.xlsx"
 
 def find_date_columns(df):
     """
-    날짜 열 자동 탐지 (datetime 기반)
+    날짜 열 자동 탐지
+    - 날짜가 연속되지 않아도 실제 날짜 컬럼만 수집
     """
     for row_idx in range(0, 10):
         row = df.iloc[row_idx]
         date_cols = []
 
         for i, val in enumerate(row):
-            if isinstance(val, (datetime, pd.Timestamp)):
+            if pd.isna(val):
+                continue
+
+            dt = pd.to_datetime(val, errors="coerce")
+            if not pd.isna(dt):
                 date_cols.append(i)
 
         if len(date_cols) > 5:
-            return row_idx, min(date_cols), max(date_cols) + 1
+            return row_idx, date_cols
 
     raise Exception("날짜 열을 찾을 수 없습니다.")
 
@@ -113,9 +118,12 @@ def main():
         df = pd.read_excel(file_path, header=None)
 
         # 1️⃣ 날짜 열 찾기
-        date_row_idx, start_col, end_col = find_date_columns(df)
+        date_row_idx, date_cols = find_date_columns(df)
 
         # 2️⃣ 데이터 시작 행 찾기
+        start_col = min(date_cols)
+        end_col = max(date_cols) + 1
+
         start_row = find_data_start_row(df, start_col, end_col)
 
             
@@ -134,8 +142,11 @@ def main():
         model_col = start_col - 3
 
 
-        date_row = df.iloc[date_row_idx, start_col:end_col].tolist()
-        date_row = [ pd.to_datetime(d).strftime("%Y/%m/%d") if not pd.isna(d) else "" for d in date_row]
+        date_row = df.iloc[date_row_idx, date_cols].tolist()
+        date_row = [
+            pd.to_datetime(d).strftime("%Y/%m/%d")
+            for d in date_row
+        ]
 
         processed_rows = []
 
@@ -152,7 +163,7 @@ def main():
             if pd.isna(product):
                 continue
 
-            row = row_full[start_col:end_col].tolist()
+            row = row_full.iloc[date_cols].tolist()
             row = [pd.to_numeric(x, errors='coerce') for x in row]
             row = [0 if pd.isna(x) else x for x in row]
 
@@ -180,6 +191,26 @@ def main():
         result_df = result_df.groupby("품번", as_index=False).agg(agg_dict)
         result_df = result_df.apply(lambda row: apply_today_result(row, today_grouped), axis=1)
         result_df = result_df[(result_df.iloc[:, 3:] != 0).any(axis=1)]
+
+        # 숫자 날짜 컬럼
+        date_columns = result_df.columns[3:]
+
+        # 행 합계 추가
+        result_df["합계"] = result_df[date_columns].sum(axis=1)
+
+        # 열 합계 행 추가
+        total_row = {
+            "모델": "합계",
+            "고객사 품번": "",
+            "품번": ""
+        }
+
+        for col in date_columns:
+            total_row[col] = result_df[col].sum()
+
+        total_row["합계"] = result_df["합계"].sum()
+
+        result_df = pd.concat([result_df, pd.DataFrame([total_row])], ignore_index=True)
 
         output_path = file_path.replace(".xlsx", "_MRP.xlsx")
 
