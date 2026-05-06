@@ -786,10 +786,18 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
 
     mes2 = mes.rename(columns={"지시량": "작업지시수량", "실적량": "MES실적량_원본"})
     pivot = pivot.merge(
-        mes2[key_cols + ["작업지시수량"]],
+        mes2[key_cols + ["작업지시수량", "MES실적량_원본"]],
         on=key_cols,
         how="left"
     )
+
+    pivot["작업지시수량"] = pd.to_numeric(
+        pivot["작업지시수량"], errors="coerce"
+    ).fillna(0)
+
+    pivot["MES실적량_원본"] = pd.to_numeric(
+        pivot["MES실적량_원본"], errors="coerce"
+    ).fillna(0)
     pivot["작업지시수량"] = pd.to_numeric(pivot["작업지시수량"], errors="coerce").fillna(0)
 
     result_rows = []
@@ -800,12 +808,24 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
 
         group_process = normalize_text(g.iloc[0]["공정"])
         group_part = normalize_part_no(g.iloc[0]["품번"])
+        carry_work_order = 0
+        
+
         extra_today_actual = safe_float(today_actual_map.get((group_process, group_part), 0.0))
+        today_actual_qty_for_group = extra_today_actual
 
         for _, row in g.iterrows():
             plan_qty = safe_float(row["계획수량"])
             midal_qty = safe_float(row["미달수량"])
-            actual_qty = safe_float(row["실적수량"])
+            mes_actual_qty = abs(safe_float(row["MES실적량_원본"]))
+
+            # 오늘 실적이 MES 실적에 이미 반영된 경우,
+            # 전일마감 기준 비교를 위해 오늘 실적만큼 차감
+            deduct_today = min(mes_actual_qty, today_actual_qty_for_group)
+            mes_actual_for_compare = mes_actual_qty - deduct_today
+            today_actual_qty_for_group -= deduct_today
+            plan_actual_qty = abs(safe_float(row["실적수량"]))
+            mes_actual_qty = abs(safe_float(row["MES실적량_원본"]))
             work_qty = safe_float(row["작업지시수량"])
 
             if plan_qty > 0:
@@ -814,13 +834,13 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
                     "공정인쇄": row["공정인쇄"],
                     "계획수량": plan_qty,
                     "미달수량": midal_qty,
-                    "실적수량": actual_qty,
+                    "실적수량": mes_actual_qty,
                     "작업지시수량": work_qty,
                     "남은계획": plan_qty,
                 })
 
             # 당일 완료신호 = 실적 + 음수미달 절대값
-            signal = actual_qty + (abs(midal_qty) if midal_qty < 0 else 0)
+            signal = mes_actual_for_compare + (abs(midal_qty) if midal_qty < 0 else 0)
             remain_signal = signal
 
             for p in open_plans:
@@ -850,16 +870,41 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
             midal_qty = safe_float(p["미달수량"])
             actual_qty = safe_float(p["실적수량"])
             work_qty = safe_float(p["작업지시수량"])
+            mes_actual_qty = abs(safe_float(row["MES실적량_원본"]))
             remain_qty = safe_float(p["남은계획"])
 
-            if work_qty > 0:
+            carry_work_order += work_qty
+            carry_work_order -= mes_actual_qty
+
+            if carry_work_order < 0:
+                carry_work_order = 0
+
+            actual_mismatch = False
+
+            plan_actual_abs = abs(actual_qty)
+
+            if plan_actual_abs != mes_actual_qty:
+                actual_mismatch = True
+
+            if actual_mismatch:
+                judge = "실적불일치"
+
+            elif midal_qty > 0:
+                if carry_work_order >= midal_qty:
+                    judge = "이전작업지시잔량유지"
+                else:
+                    judge = "미달대비_작업지시부족"
+
+            elif work_qty > 0:
                 diff_qty = plan_qty - work_qty
+
                 if diff_qty == 0:
                     judge = "일치"
                 elif diff_qty > 0:
                     judge = "해당날짜_작업지시수량부족"
                 else:
                     judge = "해당날짜_작업지시수량과다"
+
             else:
                 if remain_qty <= 0:
                     judge = "완료후MES소멸추정"
@@ -877,7 +922,7 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
                 "공정인쇄": p["공정인쇄"],
                 "계획수량": plan_qty,
                 "미달수량": midal_qty,
-                "실적수량": actual_qty,
+                "실적수량": mes_actual_for_compare,
                 "작업지시수량": work_qty,
                 "판정": judge,
             })
