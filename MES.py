@@ -798,18 +798,29 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
         group_part = normalize_part_no(g.loc[0, "품번"])
 
         today_actual_remain = safe_float(today_actual_map.get((group_process, group_part), 0.0))
-        carry_prebuild = 0
+
+        # 선생산 잔량
+        prebuild_pool = 0
+
+        # 양수 미달 잔량
+        midal_pool = 0
+
+        # 계획 FIFO 큐
         open_plans = []
 
+        # row별 계산값 저장
+        row_states = {}
+
+        # =========================
+        # 1차 패스: 미달/선생산/실적 FIFO 배분
+        # =========================
         for i, row in g.iterrows():
             plan_qty = safe_float(row["계획수량"])
             midal_qty = safe_float(row["미달수량"])
-            if midal_qty < 0:
-                carry_prebuild += abs(midal_qty)
-            current_midal = max(midal_qty, 0)
             plan_sheet_actual_qty = abs(safe_float(row["계획표실적수량"]))
             mes_actual_qty = abs(safe_float(row["MES실적량_원본"]))
             work_qty = safe_float(row["작업지시수량"])
+
             if (
                 plan_qty == 0
                 and midal_qty == 0
@@ -818,38 +829,67 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
                 and work_qty == 0
             ):
                 continue
-            if midal_qty < 0 and plan_qty == 0:
-                continue
-            prebuild_qty = abs(midal_qty) if midal_qty < 0 else 0
-
 
             # MES 실적에 오늘 실적이 이미 반영된 경우 전일마감 기준으로 차감
             deduct_today = min(mes_actual_qty, today_actual_remain)
             mes_actual_for_compare = mes_actual_qty - deduct_today
             today_actual_remain -= deduct_today
 
-            # =========================
-            # FIFO 계획 등록
-            # =========================
+            # 음수 미달 = 선생산 잔량으로 누적
+            if midal_qty < 0:
+                prebuild_pool += abs(midal_qty)
+
+            # 양수 미달 = 현재 기준 미달 스냅샷
+            if midal_qty > 0:
+                midal_pool = midal_qty
+
+            # 계획 등록: 선생산이 있으면 먼저 계획에 배분
+            used_prebuild_for_this_plan = 0
+
             if plan_qty > 0:
-                open_plans.append({
+                used_prebuild_for_this_plan = min(prebuild_pool, plan_qty)
+                prebuild_pool -= used_prebuild_for_this_plan
+
+                open_plan = {
                     "row_index": i,
-                    "remain": plan_qty,
-                    "used_actual": 0
-                })
+                    "plan_qty": plan_qty,
+                    "remain": plan_qty - used_prebuild_for_this_plan,
+                    "used_prebuild": used_prebuild_for_this_plan,
+                    "used_actual": 0,
+                }
+                open_plans.append(open_plan)
 
-            # =========================
-            # 실적은 가장 오래된 계획부터 차감
-            # =========================
-            used_for_midal = min(current_midal, plan_sheet_actual_qty)
+                row_states[i] = {
+                    "row": row,
+                    "plan_qty": plan_qty,
+                    "midal_qty": midal_qty,
+                    "current_midal": max(midal_qty, 0),
+                    "plan_sheet_actual_qty": plan_sheet_actual_qty,
+                    "mes_actual_qty": mes_actual_qty,
+                    "mes_actual_for_compare": mes_actual_for_compare,
+                    "work_qty": work_qty,
+                    "used_prebuild": used_prebuild_for_this_plan,
+                    "used_actual": 0,
+                }
+            else:
+                # 계획 없는 미달/실적행은 상태만 반영하고 결과행은 만들지 않음
+                row_states[i] = {
+                    "row": row,
+                    "plan_qty": plan_qty,
+                    "midal_qty": midal_qty,
+                    "current_midal": max(midal_qty, 0),
+                    "plan_sheet_actual_qty": plan_sheet_actual_qty,
+                    "mes_actual_qty": mes_actual_qty,
+                    "mes_actual_for_compare": mes_actual_for_compare,
+                    "work_qty": work_qty,
+                    "used_prebuild": 0,
+                    "used_actual": 0,
+                }
 
-            remain_actual = max(
-                plan_sheet_actual_qty - used_for_midal,
-                0
-            )
+            remain_actual = plan_sheet_actual_qty
 
+            # 남은 실적은 가장 오래된 계획부터 FIFO 차감
             for p in open_plans:
-
                 if remain_actual <= 0:
                     break
 
@@ -857,55 +897,32 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
                     continue
 
                 used = min(p["remain"], remain_actual)
-
                 p["remain"] -= used
                 p["used_actual"] += used
-
                 remain_actual -= used
 
-            # 현재 row가 사용한 실적량 찾기
-            plan_actual_for_today = 0
+                target_i = p["row_index"]
+                if target_i in row_states:
+                    row_states[target_i]["used_actual"] = p["used_actual"]
 
-            for p in open_plans:
-                if p["row_index"] == i:
-                    plan_actual_for_today = p["used_actual"]
-                    break
+        # =========================
+        # 2차 패스: 판정 생성
+        # =========================
+        for i, state in row_states.items():
+            row = state["row"]
 
-            # 선생산으로 먼저 계획 차감
-            used_prebuild = min(carry_prebuild, plan_qty)
+            plan_qty = state["plan_qty"]
+            midal_qty = state["midal_qty"]
+            current_midal = state["current_midal"]
+            plan_sheet_actual_qty = state["plan_sheet_actual_qty"]
+            mes_actual_qty = state["mes_actual_qty"]
+            mes_actual_for_compare = state["mes_actual_for_compare"]
+            work_qty = state["work_qty"]
 
-            remain_plan_after_prebuild = plan_qty - used_prebuild
+            used_prebuild = state["used_prebuild"]
+            plan_actual_for_today = state["used_actual"]
 
-            # MES 작업지시는 당일 계획수량과 비교
-            expected_work_qty = max(remain_plan_after_prebuild - plan_actual_for_today,0)
-            can_disappear = (
-                plan_qty > 0
-                and work_qty == 0
-                and (carry_prebuild + plan_actual_for_today) >= plan_qty
-            )
-            carry_prebuild -= used_prebuild
-            expected_actual_qty = plan_sheet_actual_qty + prebuild_qty
-
-            if work_qty == plan_qty:
-                work_judge = "작업지시일치"
-
-            elif can_disappear:
-                work_judge = "작업지시일치후소멸"
-
-            elif work_qty < plan_qty:
-                work_judge = "작업지시부족"
-
-            else:
-                work_judge = "작업지시과다"
-
-            # 실적 비교: 계획표 실적 vs MES 전일마감 기준 실적
-            if expected_actual_qty == mes_actual_for_compare:
-                actual_judge = "실적일치"
-            else:
-                actual_judge = "실적불일치"
-
-            # 미달 흐름 비교: 다음 미달이 실제로 존재하는 날짜에서만 비교
-            calculated_next_midal = midal_qty + plan_qty - expected_actual_qty
+            calculated_next_midal = midal_qty + plan_qty - plan_sheet_actual_qty
 
             future_midal_rows = g.loc[i + 1:].copy()
             future_midal_rows = future_midal_rows[
@@ -915,16 +932,61 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
             if not future_midal_rows.empty:
                 next_midal = safe_float(future_midal_rows.iloc[0]["미달수량"])
 
-                if calculated_next_midal == next_midal:
+                if abs(calculated_next_midal - next_midal) < 0.000001:
                     midal_judge = "미달흐름일치"
                 else:
                     midal_judge = "미달흐름불일치"
             else:
                 midal_judge = "미달흐름확인제외"
 
+            midal_flow_ok = midal_judge in ("미달흐름일치", "미달흐름확인제외")
+
+            # 계획 없는 미달/실적 단독행은 비교결과에서 제외
+            if plan_qty == 0:
+                continue
+
+            completed_qty = used_prebuild + plan_actual_for_today
+
+            # 작업지시 판정
+            if work_qty == plan_qty:
+                work_judge = "작업지시일치"
+
+            elif work_qty == 0 and completed_qty >= plan_qty:
+                work_judge = "작업지시일치후소멸"
+            
+            elif (
+                work_qty == 0
+                and plan_qty > 0
+                and midal_qty > 0
+                and plan_sheet_actual_qty > 0
+                and midal_flow_ok
+            ):
+                work_judge = "작업지시일치후미달이월"
+
+
+            elif work_qty < plan_qty:
+                work_judge = "작업지시부족"
+
+            else:
+                work_judge = "작업지시과다"
+
+
+            # 작업지시가 완료되어 MES에서 사라진 경우는 MES 실적 비교 제외
+            if work_judge in ("작업지시일치후소멸", "작업지시일치후미달이월"):
+                actual_judge = "실적확인제외_MES소멸"
+
+            else:
+                if abs(plan_sheet_actual_qty - mes_actual_for_compare) < 0.000001:
+                    actual_judge = "실적일치"
+                else:
+                    actual_judge = "실적불일치"
+
+            # 미달 흐름 판정
+            
+
             if (
-                work_judge in ("작업지시일치", "작업지시일치후소멸")
-                and actual_judge == "실적일치"
+                work_judge in ("작업지시일치", "작업지시일치후소멸", "작업지시일치후미달이월")
+                and actual_judge in ("실적일치", "실적확인제외_MES소멸")
                 and midal_judge in ("미달흐름일치", "미달흐름확인제외")
             ):
                 judge = "일치"
@@ -947,7 +1009,6 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
                 "작업지시수량": work_qty,
                 "판정": judge,
             })
-
     result = pd.DataFrame(result_rows)
     if not result.empty:
         qty_cols = [
