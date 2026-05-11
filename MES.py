@@ -56,15 +56,6 @@ WORKSHOP_TO_PROCESS = {
     "완성조립": "완성",
 }
 
-PLAN_WORKSHOP_CANONICAL = {
-    "용접": "용접",
-    "CLINCHING": "CLINCHING",
-    "TANK조립&LEAKTEST": "TANK조립&Leak Test",
-    "CORE조립": "CORE조립",
-    "출하-액세서리": "출하-액세서리",
-    "완성조립": "완성조립",
-}
-
 FINAL_COMPARE_COLUMNS = [
     "품번", "날짜", "공정", "작업장명", "작업반명", "공정인쇄",
     "계획수량", "미달수량",
@@ -75,21 +66,16 @@ FINAL_COMPARE_COLUMNS = [
 # =========================
 # 공통 유틸
 # =========================
-def normalize_text(v) -> str:
-    if v is None:
-        return ""
-    return str(v).strip()
-
-
-def normalize_compact(v) -> str:
-    return normalize_text(v).upper().replace(" ", "").replace("\n", "")
-
-
 def normalize_process_token(v) -> str:
-    t = normalize_compact(v)
-    t = t.replace("악세서리", "액세서리")
-    t = t.replace("액세사리", "액세서리")
-    return t
+    return (
+        str(v or "")
+        .strip()
+        .upper()
+        .replace(" ", "")
+        .replace("\n", "")
+        .replace("악세서리", "액세서리")
+        .replace("액세사리", "액세서리")
+    )
 
 
 def is_date_value(v) -> bool:
@@ -97,22 +83,22 @@ def is_date_value(v) -> bool:
 
 
 def normalize_kind(kind_text: str) -> Optional[str]:
-    t = normalize_text(kind_text).replace("\n", "")
+    t = normalize_process_token(kind_text).replace("\n", "")
     if t in ("미달", "계획", "실적"):
         return t
     return None
 
 
 def header_text(ws, row: int, col: int) -> str:
-    a = normalize_text(ws.cell(row, col).value)
-    b = normalize_text(ws.cell(row + 1, col).value)
+    a = normalize_process_token(ws.cell(row, col).value)
+    b = normalize_process_token(ws.cell(row + 1, col).value)
     return f"{a} {b}".strip()
 
 
 def row_join_text(ws, r: int, upto_col: Optional[int] = None) -> str:
     if upto_col is None:
         upto_col = ws.max_column
-    vals = [normalize_text(ws.cell(r, c).value) for c in range(1, upto_col + 1)]
+    vals = [normalize_process_token(ws.cell(r, c).value) for c in range(1, upto_col + 1)]
     vals = [v for v in vals if v]
     return " ".join(vals)
 
@@ -122,7 +108,7 @@ def safe_float(v) -> float:
     return 0.0 if pd.isna(n) else float(n)
 
 def normalize_part_no(v: str) -> str:
-    t = normalize_text(v).upper()
+    t = normalize_process_token(v).upper()
     # 공백, 언더바만 제거하고 하이픈(-)은 유지
     for ch in [" ", "_"]:
         t = t.replace(ch, "")
@@ -208,9 +194,9 @@ def make_compare_key(process: str, workshop: str, team: str, part_no: str, day) 
     완성 + 출하-액세서리 는 공정 + 품번 + 날짜만으로 비교한다.
     나머지는 기존처럼 공정 + 작업장명 + 작업반명 + 품번 + 날짜 사용.
     """
-    process = normalize_text(process)
-    workshop = normalize_text(workshop)
-    team = normalize_text(team)
+    process = normalize_process_token(process)
+    workshop = normalize_process_token(workshop)
+    team = normalize_process_token(team)
     part_no = normalize_part_no(part_no)
     day = pd.to_datetime(day, errors="coerce").normalize()
 
@@ -221,7 +207,7 @@ def make_compare_key(process: str, workshop: str, team: str, part_no: str, day) 
 
 
 def normalize_today_actual_process(v: str) -> Optional[str]:
-    t = normalize_text(v).replace(" ", "").upper()
+    t = normalize_process_token(v).replace(" ", "").upper()
 
     if t in ("완성조립", "완성"):
         return "완성"
@@ -231,17 +217,11 @@ def normalize_today_actual_process(v: str) -> Optional[str]:
         return "CORE"
 
     return None
-def canonical_workshop_name(name: str) -> str:
-    mapped = PLAN_WORKSHOP_CANONICAL.get(normalize_process_token(name), normalize_text(name))
-    mapped = mapped.replace("악세서리", "액세서리").replace("액세사리", "액세서리")
-    if mapped == "출하-액세서리":
-        return "출하-액세서리"
-    return mapped
 
 def make_fifo_group_key(process: str, workshop: str, team: str, part_no: str) -> str:
-    process = normalize_text(process)
+    process = normalize_process_token(process)
     workshop = canonical_workshop_name(workshop)
-    team = normalize_text(team)
+    team = normalize_process_token(team)
     part_no = normalize_part_no(part_no)
 
     # 액세서리는 작업반 제외
@@ -350,7 +330,7 @@ def is_red_font_cell(ws, row: int, col: int) -> bool:
 
 
 def is_skip_summary_row(*values) -> bool:
-    text = " ".join([normalize_text(v) for v in values if normalize_text(v)])
+    text = " ".join([normalize_process_token(v) for v in values if normalize_process_token(v)])
     if not text:
         return True
     skip_keywords = ["합계", "소계", "TOTAL", "누계"]
@@ -365,8 +345,8 @@ def should_skip_row(product, process_name, sheet_title: str = "") -> bool:
     - 클린칭C skip
     - 개발/기타 skip
     """
-    product_txt = normalize_text(product).upper()
-    process_name_raw = normalize_text(process_name)
+    product_txt = normalize_process_token(product)
+    process_name_raw = normalize_process_token(process_name)
 
     if product_txt.startswith("HH"):
         return True
@@ -381,7 +361,7 @@ def should_skip_row(product, process_name, sheet_title: str = "") -> bool:
 
 
 def map_workcenter_and_team(process_name):
-    p_raw = normalize_text(process_name)
+    p_raw = normalize_process_token(process_name)
     p = normalize_process_token(p_raw)
 
     if "AL" == p or "AL" in p:
@@ -412,7 +392,11 @@ def map_workcenter_and_team(process_name):
 
 
 def canonical_workshop_name(name: str) -> str:
-    return PLAN_WORKSHOP_CANONICAL.get(normalize_process_token(name), normalize_text(name))
+    return (
+        normalize_process_token(name)
+        .replace("악세서리", "액세서리")
+        .replace("액세사리", "액세서리")
+    )
 
 
 def map_process_from_workshop(name: str) -> Optional[str]:
@@ -425,19 +409,23 @@ def pick_plan_part_no(workshop_name: str, row_values: Dict[str, str]) -> str:
     if w == "CORE조립":
         return row_values.get("core_part_no", "")
 
-    if w in ("용접", "CLINCHING", "TANK조립&LEAKTEST"):
+    elif w in ("용접", "CLINCHING", "TANK조립&LEAKTEST"):
         return row_values.get("tank_part_no", "")
 
-    if w == "완성조립":
+    elif w == "완성조립":
         return row_values.get("finish_part_no", "")
 
-    if w in ("출하-액세서리", "출하-액세사리"):
-        return row_values.get("accessory_part_no", "") or row_values.get("finish_part_no", "")
+    elif "액세서리" in w:
+        return (
+            row_values.get("accessory_part_no", "")
+            or row_values.get("finish_part_no", "")
+        )
 
+    # fallback
     return (
-        row_values.get("finish_part_no", "") or
-        row_values.get("tank_part_no", "") or
-        row_values.get("core_part_no", "")
+        row_values.get("finish_part_no", "")
+        or row_values.get("tank_part_no", "")
+        or row_values.get("core_part_no", "")
     )
 
 
@@ -456,24 +444,24 @@ def extract_plan_sheet(ws, config: Dict) -> pd.DataFrame:
     accessory_mode = False
 
     for r in range(DATA_START_ROW, ws.max_row + 1):
-        model_val = normalize_text(ws.cell(r, cols["model_col"]).value)
+        model_val = normalize_process_token(ws.cell(r, cols["model_col"]).value)
         if model_val:
             current_model = model_val
         model = current_model
 
         row_values = {
-            "customer_part_no": normalize_text(ws.cell(r, cols["customer_part_col"]).value) if cols["customer_part_col"] else "",
-            "core_part_no": normalize_text(ws.cell(r, cols["core_part_col"]).value) if cols["core_part_col"] else "",
-            "tank_part_no": normalize_text(ws.cell(r, cols["tank_part_col"]).value) if cols["tank_part_col"] else "",
-            "finish_part_no": normalize_text(ws.cell(r, cols["finish_part_col"]).value) if cols["finish_part_col"] else "",
-            "accessory_part_no": normalize_text(ws.cell(r, cols["accessory_part_col"]).value) if cols["accessory_part_col"] else "",
+            "customer_part_no": normalize_process_token(ws.cell(r, cols["customer_part_col"]).value) if cols["customer_part_col"] else "",
+            "core_part_no": normalize_process_token(ws.cell(r, cols["core_part_col"]).value) if cols["core_part_col"] else "",
+            "tank_part_no": normalize_process_token(ws.cell(r, cols["tank_part_col"]).value) if cols["tank_part_col"] else "",
+            "finish_part_no": normalize_process_token(ws.cell(r, cols["finish_part_col"]).value) if cols["finish_part_col"] else "",
+            "accessory_part_no": normalize_process_token(ws.cell(r, cols["accessory_part_col"]).value) if cols["accessory_part_col"] else "",
         }
 
         row_text = row_join_text(ws, r)
 
         if ws.title == "완성공정(실적)":
             first_col_raw = get_merged_value(ws, r, 1)
-            first_col_text = normalize_text(first_col_raw).replace(" ", "").replace("\n", "").upper()
+            first_col_text = normalize_process_token(first_col_raw).replace(" ", "").replace("\n", "").upper()
 
             if "용접C/M" in first_col_text or "코어C/M" in first_col_text or "선발주-용접C/M" in first_col_text:
                 continue
@@ -486,7 +474,7 @@ def extract_plan_sheet(ws, config: Dict) -> pd.DataFrame:
             # 액세서리 표 시작 후 합계/소계 행 스킵
             if accessory_mode:
                 first_col_raw = get_merged_value(ws, r, 1)
-                first_col_text = normalize_text(first_col_raw).replace(" ", "").upper()
+                first_col_text = normalize_process_token(first_col_raw).replace(" ", "").upper()
 
                 if first_col_text.startswith("단품"):
                     break  # 👉 여기 핵심 (for r 루프 종료)
@@ -495,7 +483,7 @@ def extract_plan_sheet(ws, config: Dict) -> pd.DataFrame:
         if accessory_mode and ws.title == "완성공정(실적)":
             process_name_raw = "액세서리 & HEAT SCREEN"
         elif cols["process_print_col"]:
-            process_name_raw = normalize_text(ws.cell(r, cols["process_print_col"]).value)
+            process_name_raw = normalize_process_token(ws.cell(r, cols["process_print_col"]).value)
 
         if not process_name_raw:
             process_name_raw = config.get("default_process", "")
@@ -517,7 +505,7 @@ def extract_plan_sheet(ws, config: Dict) -> pd.DataFrame:
         part_no = pick_plan_part_no(workshop_name, row_values)
         product_key = row_values.get("customer_part_no") or part_no
 
-        if ws.title == "완성공정(실적)" and normalize_text(part_no) == "2":
+        if ws.title == "완성공정(실적)" and normalize_process_token(part_no) == "2":
             continue
 
         if should_skip_row(product_key, process_name_raw, ws.title):
@@ -544,7 +532,7 @@ def extract_plan_sheet(ws, config: Dict) -> pd.DataFrame:
 
             process = map_process_from_workshop(workshop_name)
             workshop = canonical_workshop_name(workshop_name)
-            team = normalize_text(team_name)
+            team = normalize_process_token(team_name)
             part_norm = normalize_part_no(part_no)
 
             records.append({
@@ -714,7 +702,20 @@ def build_plan_compare_base(plan_df: pd.DataFrame) -> pd.DataFrame:
 # =========================
 # 비교 로직
 # =========================
-def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, today_actual_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, today_actual_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """
+    비교 핵심 로직
+
+    계산 기준:
+    1. 같은 공정/작업장/작업반/품번 단위로 날짜순 계산
+    2. 음수 미달 = 선생산 → 미래 계획에 먼저 사용
+    3. 양수 미달 = 과거 계획 잔량 스냅샷
+       - 이전 open plan 잔량이 없을 때만 backlog로 봄
+    4. 계획표 실적은 가장 오래된 미완료 계획부터 FIFO 차감
+    5. MES 작업지시가 0이어도 계획표 실적으로 계획이 소진되었으면 정상
+    6. MES 작업지시가 없고 미달흐름이 맞으면 미달이월 정상으로 인정
+    """
+
     if plan_df.empty:
         return pd.DataFrame(columns=FINAL_COMPARE_COLUMNS)
 
@@ -723,24 +724,37 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
 
     key_cols = ["비교키", "공정", "작업장명", "작업반명", "품번", "날짜"]
 
+    # =========================
+    # 기본 정규화
+    # =========================
     plan["날짜"] = pd.to_datetime(plan["날짜"], errors="coerce").dt.normalize()
     mes["날짜"] = pd.to_datetime(mes["날짜"], errors="coerce").dt.normalize()
+
     plan["수량"] = pd.to_numeric(plan["수량"], errors="coerce").fillna(0)
     mes["지시량"] = pd.to_numeric(mes["지시량"], errors="coerce").fillna(0)
     mes["실적량"] = pd.to_numeric(mes["실적량"], errors="coerce").fillna(0)
+
     plan["품번"] = plan["품번"].apply(normalize_part_no)
     mes["품번"] = mes["품번"].apply(normalize_part_no)
 
+    # =========================
+    # 오늘 실적 맵
+    # =========================
     today_actual_map = {}
+
     if today_actual_df is not None and not today_actual_df.empty:
         tmp = today_actual_df.copy()
         tmp["품번"] = tmp["품번"].apply(normalize_part_no)
         tmp["공정"] = tmp["공정"].astype(str).str.strip()
+
         today_actual_map = {
             (row["공정"], row["품번"]): safe_float(row["오늘실적수량"])
             for _, row in tmp.iterrows()
         }
 
+    # =========================
+    # 계획 피벗: 미달/계획/실적 분리
+    # =========================
     pivot = (
         plan.groupby(key_cols + ["구분"], as_index=False)
             .agg(수량=("수량", "sum"))
@@ -764,21 +778,39 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
         "실적": "계획표실적수량",
     })
 
+    # FIFO 계산 그룹키
     pivot["FIFO그룹키"] = pivot.apply(
-        lambda x: make_fifo_group_key(x["공정"], x["작업장명"], x["작업반명"], x["품번"]),
+        lambda x: make_fifo_group_key(
+            x["공정"],
+            x["작업장명"],
+            x["작업반명"],
+            x["품번"]
+        ),
         axis=1
     )
 
+    # 공정인쇄 표시용
     plan_info = (
         plan[plan["구분"] == "계획"]
         .groupby(key_cols, as_index=False)
-        .agg(공정인쇄=("공정인쇄", lambda s: " / ".join(sorted({x for x in s if normalize_text(x)}))))
+        .agg(
+            공정인쇄=(
+                "공정인쇄",
+                lambda s: " / ".join(sorted({x for x in s if normalize_process_token(x)}))
+            )
+        )
     )
 
     pivot = pivot.merge(plan_info, on=key_cols, how="left")
     pivot["공정인쇄"] = pivot["공정인쇄"].fillna("")
 
-    mes2 = mes.rename(columns={"지시량": "작업지시수량", "실적량": "MES실적량_원본"})
+    # =========================
+    # MES merge
+    # =========================
+    mes2 = mes.rename(columns={
+        "지시량": "작업지시수량",
+        "실적량": "MES실적량_원본"
+    })
 
     pivot = pivot.merge(
         mes2[key_cols + ["작업지시수량", "MES실적량_원본"]],
@@ -786,33 +818,43 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
         how="left"
     )
 
-    pivot["작업지시수량"] = pd.to_numeric(pivot["작업지시수량"], errors="coerce").fillna(0)
-    pivot["MES실적량_원본"] = pd.to_numeric(pivot["MES실적량_원본"], errors="coerce").fillna(0)
+    pivot["작업지시수량"] = pd.to_numeric(
+        pivot["작업지시수량"], errors="coerce"
+    ).fillna(0)
+
+    pivot["MES실적량_원본"] = pd.to_numeric(
+        pivot["MES실적량_원본"], errors="coerce"
+    ).fillna(0)
 
     result_rows = []
 
+    # =========================
+    # 그룹별 FIFO 계산
+    # =========================
     for _, g in pivot.groupby("FIFO그룹키", dropna=False, sort=False):
         g = g.sort_values("날짜").reset_index(drop=True)
 
-        group_process = normalize_text(g.loc[0, "공정"])
+        group_process = normalize_process_token(g.loc[0, "공정"])
         group_part = normalize_part_no(g.loc[0, "품번"])
 
-        today_actual_remain = safe_float(today_actual_map.get((group_process, group_part), 0.0))
+        today_actual_remain = safe_float(
+            today_actual_map.get((group_process, group_part), 0.0)
+        )
 
-        # 선생산 잔량
+        # 음수 미달, 즉 선생산 잔량
         prebuild_pool = 0
 
-        # 양수 미달 잔량
-        midal_pool = 0
+        # 양수 미달. 이전 계획 잔량이 없는 경우에만 backlog로 사용
+        backlog_midal_pool = 0
 
-        # 계획 FIFO 큐
+        # 미완료 계획 FIFO 큐
         open_plans = []
 
-        # row별 계산값 저장
+        # 계획행별 계산결과 저장
         row_states = {}
 
         # =========================
-        # 1차 패스: 미달/선생산/실적 FIFO 배분
+        # 1차 패스: 선생산/미달/실적 배분
         # =========================
         for i, row in g.iterrows():
             plan_qty = safe_float(row["계획수량"])
@@ -821,6 +863,7 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
             mes_actual_qty = abs(safe_float(row["MES실적량_원본"]))
             work_qty = safe_float(row["작업지시수량"])
 
+            # 완전 0행 제거
             if (
                 plan_qty == 0
                 and midal_qty == 0
@@ -830,22 +873,26 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
             ):
                 continue
 
-            # MES 실적에 오늘 실적이 이미 반영된 경우 전일마감 기준으로 차감
+            # MES 실적에 오늘 실적이 이미 포함된 경우, 비교용으로 차감
             deduct_today = min(mes_actual_qty, today_actual_remain)
             mes_actual_for_compare = mes_actual_qty - deduct_today
             today_actual_remain -= deduct_today
 
-            # 음수 미달 = 선생산 잔량으로 누적
+            # 음수 미달 = 선생산
             if midal_qty < 0:
                 prebuild_pool += abs(midal_qty)
 
-            # 양수 미달 = 현재 기준 미달 스냅샷
-            if midal_qty > 0:
-                midal_pool = midal_qty
+            # 현재 미완료 계획 잔량
+            open_remain_sum = sum(p["remain"] for p in open_plans)
 
-            # 계획 등록: 선생산이 있으면 먼저 계획에 배분
+            # 양수 미달은 과거 계획 잔량.
+            # 이미 open plan 잔량이 있으면 중복 반영하지 않음.
+            if midal_qty > 0 and open_remain_sum == 0:
+                backlog_midal_pool = midal_qty
+
             used_prebuild_for_this_plan = 0
 
+            # 계획 등록
             if plan_qty > 0:
                 used_prebuild_for_this_plan = min(prebuild_pool, plan_qty)
                 prebuild_pool -= used_prebuild_for_this_plan
@@ -857,6 +904,7 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
                     "used_prebuild": used_prebuild_for_this_plan,
                     "used_actual": 0,
                 }
+
                 open_plans.append(open_plan)
 
                 row_states[i] = {
@@ -871,22 +919,15 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
                     "used_prebuild": used_prebuild_for_this_plan,
                     "used_actual": 0,
                 }
-            else:
-                # 계획 없는 미달/실적행은 상태만 반영하고 결과행은 만들지 않음
-                row_states[i] = {
-                    "row": row,
-                    "plan_qty": plan_qty,
-                    "midal_qty": midal_qty,
-                    "current_midal": max(midal_qty, 0),
-                    "plan_sheet_actual_qty": plan_sheet_actual_qty,
-                    "mes_actual_qty": mes_actual_qty,
-                    "mes_actual_for_compare": mes_actual_for_compare,
-                    "work_qty": work_qty,
-                    "used_prebuild": 0,
-                    "used_actual": 0,
-                }
 
+            # 실적 배분 시작
             remain_actual = plan_sheet_actual_qty
+
+            # 이전 기간 미달 backlog가 있으면 먼저 차감
+            if backlog_midal_pool > 0 and remain_actual > 0:
+                used_for_backlog = min(backlog_midal_pool, remain_actual)
+                backlog_midal_pool -= used_for_backlog
+                remain_actual -= used_for_backlog
 
             # 남은 실적은 가장 오래된 계획부터 FIFO 차감
             for p in open_plans:
@@ -897,11 +938,13 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
                     continue
 
                 used = min(p["remain"], remain_actual)
+
                 p["remain"] -= used
                 p["used_actual"] += used
                 remain_actual -= used
 
                 target_i = p["row_index"]
+
                 if target_i in row_states:
                     row_states[target_i]["used_actual"] = p["used_actual"]
 
@@ -922,6 +965,11 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
             used_prebuild = state["used_prebuild"]
             plan_actual_for_today = state["used_actual"]
 
+            completed_qty = used_prebuild + plan_actual_for_today
+
+            # =========================
+            # 미달 흐름 판정
+            # =========================
             calculated_next_midal = midal_qty + plan_qty - plan_sheet_actual_qty
 
             future_midal_rows = g.loc[i + 1:].copy()
@@ -941,19 +989,15 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
 
             midal_flow_ok = midal_judge in ("미달흐름일치", "미달흐름확인제외")
 
-            # 계획 없는 미달/실적 단독행은 비교결과에서 제외
-            if plan_qty == 0:
-                continue
-
-            completed_qty = used_prebuild + plan_actual_for_today
-
+            # =========================
             # 작업지시 판정
+            # =========================
             if work_qty == plan_qty:
                 work_judge = "작업지시일치"
 
             elif work_qty == 0 and completed_qty >= plan_qty:
                 work_judge = "작업지시일치후소멸"
-            
+
             elif (
                 work_qty == 0
                 and plan_qty > 0
@@ -963,27 +1007,27 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
             ):
                 work_judge = "작업지시일치후미달이월"
 
-
             elif work_qty < plan_qty:
                 work_judge = "작업지시부족"
 
             else:
                 work_judge = "작업지시과다"
 
-
-            # 작업지시가 완료되어 MES에서 사라진 경우는 MES 실적 비교 제외
+            # =========================
+            # 실적 판정
+            # MES 작업지시가 소멸된 케이스는 MES 실적 비교 제외
+            # =========================
             if work_judge in ("작업지시일치후소멸", "작업지시일치후미달이월"):
                 actual_judge = "실적확인제외_MES소멸"
-
             else:
                 if abs(plan_sheet_actual_qty - mes_actual_for_compare) < 0.000001:
                     actual_judge = "실적일치"
                 else:
                     actual_judge = "실적불일치"
 
-            # 미달 흐름 판정
-            
-
+            # =========================
+            # 최종 판정
+            # =========================
             if (
                 work_judge in ("작업지시일치", "작업지시일치후소멸", "작업지시일치후미달이월")
                 and actual_judge in ("실적일치", "실적확인제외_MES소멸")
@@ -1009,11 +1053,21 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
                 "작업지시수량": work_qty,
                 "판정": judge,
             })
+
     result = pd.DataFrame(result_rows)
+
+    # =========================
+    # 결과 0행 제거
+    # =========================
     if not result.empty:
         qty_cols = [
-            "계획수량", "미달수량", "계획표실적수량", "MES실적수량",
-            "전일마감기준실적수량", "계획대비실적수량", "작업지시수량"
+            "계획수량",
+            "미달수량",
+            "계획표실적수량",
+            "MES실적수량",
+            "전일마감기준실적수량",
+            "계획대비실적수량",
+            "작업지시수량",
         ]
 
         for c in qty_cols:
@@ -1021,11 +1075,20 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
 
         result = result[result[qty_cols].abs().sum(axis=1) != 0].copy()
 
-    plan_keys = pivot[pivot["계획수량"] > 0][key_cols].drop_duplicates().assign(계획존재=1)
+    # =========================
+    # 계획 없는 MES 작업지시 처리
+    # 단, 이후 양수 미달로 설명 가능하면 일치 처리
+    # =========================
+    plan_keys = (
+        pivot[pivot["계획수량"] > 0][key_cols]
+        .drop_duplicates()
+        .assign(계획존재=1)
+    )
+
     mes_only = mes2.merge(plan_keys, on=key_cols, how="left")
     mes_only = mes_only[mes_only["계획존재"].isna()].copy()
 
-    future_midal_map = {}
+    future_midal_allowance = {}
     positive_midal = pivot[pivot["미달수량"] > 0].copy()
 
     for _, r in positive_midal.iterrows():
@@ -1036,23 +1099,27 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
             r["품번"]
         )
 
-        future_midal_map[gkey] = future_midal_map.get(gkey, 0) + safe_float(r["미달수량"])
+        future_midal_allowance[gkey] = future_midal_allowance.get(gkey, 0) + safe_float(r["미달수량"])
 
     if not mes_only.empty:
         mes_only["공정인쇄"] = ""
         mes_only["계획수량"] = 0
         mes_only["미달수량"] = 0
         mes_only["계획표실적수량"] = 0
-        mes_only["MES실적수량"] = pd.to_numeric(mes_only["MES실적량_원본"], errors="coerce").fillna(0).abs()
+
+        mes_only["MES실적수량"] = pd.to_numeric(
+            mes_only["MES실적량_원본"], errors="coerce"
+        ).fillna(0).abs()
+
         mes_only["전일마감기준실적수량"] = mes_only["MES실적수량"]
         mes_only["계획대비실적수량"] = 0
-        mes_only["판정"] = "해당날짜_계획없는데작업지시있음"
 
-        remain_future_midal = future_midal_map.copy()
+        remain_future_midal = future_midal_allowance.copy()
         judge_list = []
 
-        for idx, r in mes_only.iterrows():
+        mes_only = mes_only.sort_values(["공정", "작업장명", "작업반명", "품번", "날짜"]).copy()
 
+        for _, r in mes_only.iterrows():
             gkey = make_fifo_group_key(
                 r["공정"],
                 r["작업장명"],
@@ -1061,21 +1128,16 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
             )
 
             work_qty = safe_float(r["작업지시수량"])
-
             remain_midal = remain_future_midal.get(gkey, 0)
 
-            # 이후 미달로 설명 가능
             if remain_midal > 0:
-
                 use_qty = min(remain_midal, work_qty)
-
                 remain_future_midal[gkey] -= use_qty
 
                 if work_qty <= remain_midal:
                     judge = "일치"
                 else:
                     judge = "부분일치_초과작업지시존재"
-
             else:
                 judge = "해당날짜_계획없는데작업지시있음"
 
@@ -1089,9 +1151,16 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
                 + mes_only["MES실적수량"].abs()
             ) != 0
         ].copy()
+
         mes_only = mes_only[FINAL_COMPARE_COLUMNS]
 
         result = pd.concat([result, mes_only], ignore_index=True)
+
+    # =========================
+    # 최종 정리
+    # =========================
+    if result.empty:
+        return pd.DataFrame(columns=FINAL_COMPARE_COLUMNS)
 
     result = result[FINAL_COMPARE_COLUMNS]
     result["날짜"] = pd.to_datetime(result["날짜"], errors="coerce").dt.strftime("%Y-%m-%d")
@@ -1099,10 +1168,6 @@ def build_plan_status_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, tod
     return result.sort_values(
         ["공정", "작업장명", "작업반명", "품번", "날짜"]
     ).reset_index(drop=True)
-
-
-def compare_plan_vs_mes_detail(plan_df: pd.DataFrame, mes_df: pd.DataFrame, today_actual_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    return build_plan_status_with_fifo(plan_df, mes_df, today_actual_df)
 
 
 # =========================
@@ -1154,7 +1219,7 @@ def main():
     plan_base_df = build_plan_compare_base(plan_df)
     print(f"[계획 비교기준] {len(plan_base_df)}건")
 
-    compare_df = compare_plan_vs_mes_detail(plan_df, mes_df, today_actual_df)
+    compare_df = compare_plan_mes_with_fifo(plan_df, mes_df, today_actual_df)
     compare_df = filter_by_period(compare_df, start_date=START_DATE, end_date=END_DATE)
     print(f"[비교 결과] {len(compare_df)}건")
 
