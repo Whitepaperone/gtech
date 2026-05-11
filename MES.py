@@ -5,6 +5,7 @@ from tkinter import filedialog, messagebox
 from tkcalendar import Calendar
 
 import pandas as pd
+import time
 from openpyxl import load_workbook
 
 # test
@@ -29,6 +30,8 @@ if not MES_FILE:
     raise SystemExit("MES 작업지시 엑셀을 선택하지 않았습니다.")
 
 OUTPUT_FILE = "./계획수량_작업지시_비교결과.xlsx"
+
+
 
 
 
@@ -93,6 +96,15 @@ def header_text(ws, row: int, col: int) -> str:
     a = normalize_process_token(ws.cell(row, col).value)
     b = normalize_process_token(ws.cell(row + 1, col).value)
     return f"{a} {b}".strip()
+
+def build_merged_map(ws):
+    merged_map = {}
+    for merged in ws.merged_cells.ranges:
+        top_value = ws.cell(merged.min_row, merged.min_col).value
+        for row in range(merged.min_row, merged.max_row + 1):
+            for col in range(merged.min_col, merged.max_col + 1):
+                merged_map[(row, col)] = top_value
+    return merged_map
 
 
 def row_join_text(ws, r: int, upto_col: Optional[int] = None) -> str:
@@ -285,12 +297,6 @@ def build_date_columns(ws) -> List[Dict]:
 
     return cols
 
-def get_merged_value(ws, row: int, col: int):
-    cell = ws.cell(row, col)
-    for merged in ws.merged_cells.ranges:
-        if cell.coordinate in merged:
-            return ws.cell(merged.min_row, merged.min_col).value
-    return cell.value
 
 def get_sheet_columns(ws) -> Dict[str, Optional[int]]:
     return {
@@ -433,7 +439,9 @@ def pick_plan_part_no(workshop_name: str, row_values: Dict[str, str]) -> str:
 # 생산계획 정규화
 # =========================
 def extract_plan_sheet(ws, config: Dict) -> pd.DataFrame:
+    merged_map = build_merged_map(ws)
     date_cols = build_date_columns(ws)
+
     if not date_cols:
         raise RuntimeError(f"{ws.title}: 날짜/구분 컬럼을 찾지 못했습니다.")
 
@@ -444,6 +452,11 @@ def extract_plan_sheet(ws, config: Dict) -> pd.DataFrame:
     accessory_mode = False
 
     for r in range(DATA_START_ROW, ws.max_row + 1):
+
+        if (r - DATA_START_ROW) % 200 == 0:
+            percent = (r - DATA_START_ROW) / max(ws.max_row - DATA_START_ROW, 1) * 100
+            print(f"[{ws.title}] 계획 추출 진행률: {percent:.1f}% ({r}/{ws.max_row})")
+
         model_val = normalize_process_token(ws.cell(r, cols["model_col"]).value)
         if model_val:
             current_model = model_val
@@ -460,7 +473,7 @@ def extract_plan_sheet(ws, config: Dict) -> pd.DataFrame:
         row_text = row_join_text(ws, r)
 
         if ws.title == "완성공정(실적)":
-            first_col_raw = get_merged_value(ws, r, 1)
+            first_col_raw = merged_map.get((r, 1), ws.cell(r, 1).value)
             first_col_text = normalize_process_token(first_col_raw).replace(" ", "").replace("\n", "").upper()
 
             if "용접C/M" in first_col_text or "코어C/M" in first_col_text or "선발주-용접C/M" in first_col_text:
@@ -473,7 +486,7 @@ def extract_plan_sheet(ws, config: Dict) -> pd.DataFrame:
 
             # 액세서리 표 시작 후 합계/소계 행 스킵
             if accessory_mode:
-                first_col_raw = get_merged_value(ws, r, 1)
+                first_col_raw = merged_map.get((r, 1), ws.cell(r, 1).value)
                 first_col_text = normalize_process_token(first_col_raw).replace(" ", "").upper()
 
                 if first_col_text.startswith("단품"):
@@ -519,7 +532,7 @@ def extract_plan_sheet(ws, config: Dict) -> pd.DataFrame:
 
         for dc in date_cols:
             # 빨간 글씨는 읽지 않음
-            if is_red_font_cell(ws, r, dc["col"]):
+            if CHECK_RED_FONT and is_red_font_cell(ws, r, dc["col"]):
                 continue
 
             qty = ws.cell(r, dc["col"]).value
@@ -605,8 +618,9 @@ def extract_mes(mes_file: str) -> pd.DataFrame:
     df["날짜"] = pd.to_datetime(df["계획일"], errors="coerce").dt.normalize()
     df["지시량"] = pd.to_numeric(df["지시량"], errors="coerce").fillna(0)
     df["실적량"] = pd.to_numeric(df["실적량"], errors="coerce").fillna(0)
+    df["작업장명"] = df["작업장명"].apply(canonical_workshop_name)
     df["품번"] = df["품번"].apply(normalize_part_no)
-    df["작업반명"] = df["작업반명"].astype(str).str.strip()
+    df["작업반명"] = df["작업반명"].apply(normalize_process_token)
 
     df["비교키"] = df.apply(
         lambda x: make_compare_key(
@@ -1198,6 +1212,8 @@ def main():
 
     root.update()  # 날짜 선택 창이 닫힌 후에 업데이트
 
+    global CHECK_RED_FONT
+    CHECK_RED_FONT = messagebox.askyesno("빨간 글씨 체크 제외", "계획표에서 빨간 글씨로 표시된 셀을 제외하시겠습니까?\n(수락하면 빨간 글씨는 수량 계산에서 제외됩니다)")
     today_result_file = messagebox.askyesno("실적 적용 여부", "output.xlsx 같은 실적 파일을 불러와서\n작업지시 수량에 반영하시겠습니까?")
     today_actual_file = None
     if today_result_file:
