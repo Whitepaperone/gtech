@@ -1,5 +1,6 @@
 import pandas as pd
 from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment
 from tkinter import Tk, filedialog, messagebox
 from datetime import datetime
 
@@ -29,8 +30,9 @@ from openpyxl import load_workbook
 
 
 
-def select_file(title):
+def select_file(title, parent):
     return filedialog.askopenfilename(
+        parent=parent,
         title=title,
         filetypes=[("Excel files", "*.xlsx *.xls")]
     )
@@ -124,27 +126,80 @@ def move_column_after(df, column_name, after_column):
 
     return df[cols]
 
+def format_result_excel(file_path):
+    wb = load_workbook(file_path)
+    ws = wb.active
+
+    # 레벨 컬럼 찾기
+    level_col = None
+    for cell in ws[1]:
+        if cell.value == "레벨":
+            level_col = cell.column
+            break
+
+    # 기본 스타일
+    for row in ws.iter_rows():
+        for cell in row:
+            cell.font = Font(name="맑은 고딕", size=10)
+            cell.alignment = Alignment(
+                vertical="center",
+            )
+
+    # 레벨 0 행 색칠
+    if level_col:
+        fill = PatternFill(
+            fill_type="solid",
+            fgColor="FFF2CC"  # 연노랑
+        )
+
+        for row in range(2, ws.max_row + 1):
+            level_value = ws.cell(row=row, column=level_col).value
+
+            try:
+                is_level_zero = int(level_value) == 0
+            except:
+                is_level_zero = False
+
+            if is_level_zero:
+                for col in range(1, ws.max_column + 1):
+                    ws.cell(row=row, column=col).fill = fill
+                    ws.cell(row=row, column=col).font = Font(
+                        name="맑은 고딕",
+                        size=10,
+                        bold=True
+                    )
+
+    wb.save(file_path)
+    wb.close()
+
+
 def main():
     root = Tk()
     root.withdraw()
 
-    bom_file = select_file("BOM 기준 재고 현황 파일 선택")
+    # 최상위로 올리기
+    root.attributes("-topmost", True)
+    root.lift()
+    root.focus_force()
+
+    bom_file = select_file("BOM 기준 재고 현황 파일 선택", root)
     if not bom_file:
         return
 
-    adj_file = select_file("재고실사조정 파일 선택")
+    adj_file = select_file("재고실사조정 파일 선택", root)
     if not adj_file:
         return
 
-    supplier_file = select_file("협력사 정보 파일 선택")
+    supplier_file = select_file("협력사(기준정보액셀관리) 파일 선택", root)
     if not supplier_file:
         return
 
-    plan_file = select_file("계획 수량 파일 선택")
+    plan_file = select_file("계획 수량 파일 선택", root)
     if not plan_file:
         return
 
     save_file = filedialog.asksaveasfilename(
+        parent=root,
         title="결과 파일 저장",
         initialfile=f"BOM_결과_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         defaultextension=".xlsx",
@@ -217,6 +272,8 @@ def main():
     result_df = move_column_after(result_df, "재공", "재고량")
 
     result_df.to_excel(save_file, index=False)
+
+    format_result_excel(save_file)
 
     messagebox.showinfo("완료", f"결과 파일 생성 완료\n\n{save_file}")
 
