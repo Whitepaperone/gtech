@@ -1,4 +1,5 @@
 from datetime import datetime, date
+from logging import root
 from typing import List, Dict, Optional
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -12,27 +13,15 @@ from openpyxl import load_workbook
 # =========================
 # 파일 선택
 # =========================
-root = tk.Tk()
-root.withdraw()
 
-PLAN_FILE = filedialog.askopenfilename(
-    title="생산계획 엑셀 선택",
-    filetypes=[("Excel files", "*.xlsx *.xls")]
-)
-if not PLAN_FILE:
-    raise SystemExit("생산계획 엑셀을 선택하지 않았습니다.")
-
-MES_FILE = filedialog.askopenfilename(
-    title="MES 작업지시 엑셀 선택",
-    filetypes=[("Excel files", "*.xlsx *.xls")]
-)
-if not MES_FILE:
-    raise SystemExit("MES 작업지시 엑셀을 선택하지 않았습니다.")
+def select_file(title, parent):
+    return filedialog.askopenfilename(
+        parent=parent,
+        title=title,
+        filetypes=[("Excel files", "*.xlsx *.xls")]
+    )
 
 OUTPUT_FILE = "./계획수량_작업지시_비교결과.xlsx"
-
-
-
 
 
 # =========================
@@ -1207,6 +1196,20 @@ def save_results(plan_df, mes_df, plan_base_df, compare_df, output_file: str):
 # 실행
 # =========================
 def main():
+    root = tk.Tk()
+    root.withdraw()
+
+    root.attributes("-topmost", True)
+    root.lift()
+    root.focus_force()
+
+    plan_file = select_file("생산계획 엑셀 선택", root)
+    if not plan_file:
+        raise SystemExit("생산계획 엑셀을 선택하지 않았습니다.")
+
+    mes_file = select_file("MES 작업지시 엑셀 선택", root)
+    if not mes_file:
+        raise SystemExit("MES 작업지시 엑셀을 선택하지 않았습니다.")
     
     START_DATE, END_DATE = select_date_range(root)
 
@@ -1224,11 +1227,11 @@ def main():
     today_actual_df = extract_today_actual(today_actual_file)
     print(f"[오늘 실적 정규화] {len(today_actual_df)}건")
 
-    plan_df = extract_plan_all(PLAN_FILE)
+    plan_df = extract_plan_all(plan_file)
     plan_df = filter_by_period(plan_df, start_date=START_DATE, end_date=END_DATE)
     print(f"[계획 정규화] {len(plan_df)}건")
 
-    mes_df = extract_mes(MES_FILE)
+    mes_df = extract_mes(mes_file)
     mes_df = filter_by_period(mes_df, start_date=START_DATE, end_date=END_DATE)
     print(f"[MES 정규화] {len(mes_df)}건")
 
