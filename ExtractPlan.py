@@ -1,71 +1,37 @@
-from datetime import datetime, date
 from typing import Optional, List, Dict
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 import pandas as pd
 from openpyxl import load_workbook
 
+from AppConstants import (
+    DATA_START_ROW,
+    DATE_HEADER_GAP_BREAK,
+    DATE_SCAN_MIN_COL,
+    HEADER_DATE_ROW,
+    HEADER_KIND_ROW,
+    MES_SHEET_CONFIG,
+    PLAN_OUTPUT_FILE,
+    PLAN_SHEET_NAMES,
+    WORKSHOP_TO_PROCESS,
+)
+from CommonUtils import (
+    build_merged_map,
+    get_merged_value,
+    header_text,
+    is_date_value,
+    normalize_kind,
+    normalize_part_no,
+    normalize_process_token,
+    row_join_text,
+    safe_float,
+)
 
 # =========================
 # 설정
 # =========================
-SHEET_NAME = ["완성공정(실적)","TANK공정(실적)","CORE공정(실적)"]
-OUTPUT_FILE = "./생산계획_계획수량_추출.xlsx"
-
-HEADER_DATE_ROW = 33   # 날짜 행
-HEADER_KIND_ROW = 34   # 구분 행: 미달 / 계획 / 실적
-DATA_START_ROW = 35
-
-DATE_SCAN_MIN_COL = 1
-DATE_HEADER_GAP_BREAK = 3
-
-
-# =========================
-# 공통 함수
-# =========================
-def normalize_text(v) -> str:
-    if v is None:
-        return ""
-    return str(v).strip()
-
-
-def normalize_compact(v) -> str:
-    return normalize_text(v).upper().replace(" ", "").replace("\n", "")
-
-
-def is_date_value(v) -> bool:
-    return isinstance(v, (datetime, date))
-
-
-def safe_float(v) -> float:
-    n = pd.to_numeric(v, errors="coerce")
-    return 0.0 if pd.isna(n) else float(n)
-
-
-def normalize_part_no(v) -> str:
-    t = normalize_text(v).upper()
-    t = t.replace(" ", "").replace("_", "")
-    return t
-
-
-def header_text(ws, row: int, col: int) -> str:
-    a = normalize_text(ws.cell(row, col).value)
-    b = normalize_text(ws.cell(row + 1, col).value)
-    return f"{a} {b}".strip()
-
-
-def row_join_text(ws, r: int) -> str:
-    vals = [normalize_text(ws.cell(r, c).value) for c in range(1, ws.max_column + 1)]
-    vals = [v for v in vals if v]
-    return " ".join(vals)
-
-
-def get_merged_value(ws, row: int, col: int):
-    cell = ws.cell(row, col)
-    for merged in ws.merged_cells.ranges:
-        if cell.coordinate in merged:
-            return ws.cell(merged.min_row, merged.min_col).value
-    return cell.value
+SHEET_NAME = PLAN_SHEET_NAMES
+OUTPUT_FILE = PLAN_OUTPUT_FILE
 
 
 # =========================
@@ -110,7 +76,7 @@ def build_plan_date_columns(ws) -> List[Dict]:
 
     for c in range(start_col, ws.max_column + 1):
         date_val = ws.cell(HEADER_DATE_ROW, c).value
-        kind_val = normalize_text(ws.cell(HEADER_KIND_ROW, c).value).replace("\n", "")
+        kind_val = normalize_process_token(ws.cell(HEADER_KIND_ROW, c).value).replace("\n", "")
 
         if is_date_value(date_val):
             started = True
@@ -150,7 +116,7 @@ def get_sheet_columns(ws) -> Dict[str, Optional[int]]:
 
 
 def is_skip_summary_row(*values) -> bool:
-    text = " ".join([normalize_text(v) for v in values if normalize_text(v)])
+    text = " ".join([normalize_process_token(v) for v in values if normalize_process_token(v)])
 
     if not text:
         return True
@@ -160,15 +126,19 @@ def is_skip_summary_row(*values) -> bool:
     return any(k in text.upper() for k in skip_keywords)
 
 
-def should_skip_row(part_no, process_name, row_text) -> bool:
-    part_txt = normalize_text(part_no).upper()
-    process_txt = normalize_text(process_name)
-    row_txt = normalize_text(row_text)
+def should_skip_row(part_no, process_name, row_text="", sheet_title: str = "", product_key=None) -> bool:
+    part_txt = normalize_process_token(part_no)
+    product_txt = normalize_process_token(product_key if product_key is not None else part_no)
+    process_txt = normalize_process_token(process_name)
+    row_txt = normalize_process_token(row_text)
 
-    if part_txt.startswith("HH"):
+    if part_txt.startswith("HH") or product_txt.startswith("HH"):
         return True
 
     if part_txt == "2":
+        return True
+
+    if sheet_title == "TANK공정(실적)" and "클린칭C" in process_txt:
         return True
 
     if "개발,기타" in process_txt or "개발,기타" in row_txt:
@@ -181,110 +151,313 @@ def should_skip_row(part_no, process_name, row_text) -> bool:
 # 생산계획 추출
 # =========================
 def extract_finish_plan_sheet(ws) -> pd.DataFrame:
-    date_cols = build_plan_date_columns(ws)
-    cols = get_sheet_columns(ws)
+    return _extract_plan_sheet(ws, mode="finish")
 
+
+def build_mes_date_columns(ws) -> List[Dict]:
+    cols = []
+    started = False
+    invalid_streak = 0
+    start_col = find_date_start_col(ws)
+
+    if start_col is None:
+        return []
+
+    for c in range(start_col, ws.max_column + 1):
+        date_val = ws.cell(HEADER_DATE_ROW, c).value
+        kind_val = ws.cell(HEADER_KIND_ROW, c).value
+
+        if is_date_value(date_val):
+            started = True
+            invalid_streak = 0
+            kind = normalize_kind(kind_val) or "계획"
+            cols.append({
+                "col": c,
+                "date": pd.to_datetime(date_val).normalize(),
+                "kind": kind,
+            })
+            continue
+
+        if started:
+            invalid_streak += 1
+            if invalid_streak >= DATE_HEADER_GAP_BREAK:
+                break
+
+    return cols
+
+
+def get_mes_sheet_columns(ws) -> Dict[str, Optional[int]]:
+    return {
+        "model_col": find_col_by_keywords(ws, ["모델"], required=True),
+        "customer_part_col": find_col_by_keywords(ws, ["고객사", "품번"]),
+        "core_part_col": find_col_by_keywords(ws, ["CORE", "품번"]),
+        "tank_part_col": find_col_by_keywords(ws, ["TANK", "품번"]),
+        "finish_part_col": find_col_by_keywords(ws, ["완성", "품번"]),
+        "accessory_part_col": find_col_by_keywords(ws, ["액세", "품번"]),
+        "process_print_col": find_col_by_keywords(ws, ["공정", "인쇄"]),
+    }
+
+
+def is_red_font_cell(ws, row: int, col: int) -> bool:
+    cell = ws.cell(row, col)
+    color = getattr(cell.font, "color", None)
+    if color is None:
+        return False
+
+    rgb = getattr(color, "rgb", None)
+    if isinstance(rgb, str):
+        rgb = rgb.upper()
+        if rgb in {"FFFF0000", "00FF0000", "FF0000"}:
+            return True
+
+    return False
+
+
+def map_workcenter_and_team(process_name):
+    p_raw = normalize_process_token(process_name)
+    p = normalize_process_token(p_raw)
+
+    if "AL" == p or "AL" in p:
+        return "CORE조립", "CORE조립-AL"
+    if "CU" == p or "CU" in p:
+        return "CORE조립", "CORE조립-CU"
+    if "수동" in p_raw:
+        return "용접", "TANK용접 - 수동"
+    if "로봇" in p:
+        return "용접", "TANK용접 - ROBOT"
+    if "클린칭" in p:
+        return "CLINCHING", "CLINCHING"
+    if "TANK조립" in p_raw:
+        return "TANK조립&Leak Test", "TANK조립&Leak Test"
+    if "한국" in p_raw:
+        return "용접", "TANK용접 - 한국RAD"
+    if "일반" in p_raw:
+        return "완성조립", "완성조립공정 - 일반"
+    if "G2" in p:
+        return "완성조립", "완성조립공정 - G2"
+    if "클라크" in p_raw:
+        return "완성조립", "완성조립공정 - 클라크"
+    if "특수품" in p_raw:
+        return "완성조립", "완성조립공정 - 특수품"
+    if "액세서리" in p_raw or "HEATSCREEN" in p:
+        return "출하-액세서리", "출하-액세서리"
+    return None, None
+
+
+def canonical_workshop_name(name: str) -> str:
+    return (
+        normalize_process_token(name)
+        .replace("악세서리", "액세서리")
+        .replace("액세사리", "액세서리")
+    )
+
+
+def map_process_from_workshop(name: str) -> Optional[str]:
+    return WORKSHOP_TO_PROCESS.get(normalize_process_token(name))
+
+
+def pick_plan_part_no(workshop_name: str, row_values: Dict[str, str]) -> str:
+    w = normalize_process_token(workshop_name)
+
+    if w == "CORE조립":
+        return row_values.get("core_part_no", "")
+    if w in ("용접", "CLINCHING", "TANK조립&LEAKTEST"):
+        return row_values.get("tank_part_no", "")
+    if w == "완성조립":
+        return row_values.get("finish_part_no", "")
+    if "액세서리" in w:
+        return row_values.get("accessory_part_no", "") or row_values.get("finish_part_no", "")
+
+    return (
+        row_values.get("finish_part_no", "")
+        or row_values.get("tank_part_no", "")
+        or row_values.get("core_part_no", "")
+    )
+
+
+def make_compare_key(process: str, workshop: str, team: str, part_no: str, day) -> str:
+    process = normalize_process_token(process)
+    workshop = normalize_process_token(workshop)
+    team = normalize_process_token(team)
+    part_no = normalize_part_no(part_no)
+    day = pd.to_datetime(day, errors="coerce").normalize()
+
+    if process == "완성" and workshop == "출하-액세서리":
+        return f"{process}|{part_no}|{day}"
+
+    return f"{process}|{workshop}|{team}|{part_no}|{day}"
+
+
+def extract_plan_sheet(ws, config: Dict, check_red_font: bool = False, progress=None) -> pd.DataFrame:
+    return _extract_plan_sheet(ws, mode="mes", config=config, check_red_font=check_red_font, progress=progress)
+
+
+def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_font: bool = False, progress=None) -> pd.DataFrame:
+    is_mes = mode == "mes"
+    config = config or {}
+    merged_map = build_merged_map(ws) if is_mes else None
+    date_cols = build_mes_date_columns(ws) if is_mes else build_plan_date_columns(ws)
+
+    if not date_cols:
+        raise RuntimeError(f"{ws.title}: 날짜/구분 컬럼을 찾지 못했습니다.")
+
+    cols = get_mes_sheet_columns(ws) if is_mes else get_sheet_columns(ws)
     records = []
     current_model = ""
     accessory_mode = False
 
     for r in range(DATA_START_ROW, ws.max_row + 1):
-        model_val = normalize_text(ws.cell(r, cols["model_col"]).value)
+        if is_mes and (r - DATA_START_ROW) % 200 == 0:
+            percent = (r - DATA_START_ROW) / max(ws.max_row - DATA_START_ROW, 1) * 100
+            if progress:
+                progress(percent, f"{ws.title} 계획 추출 중... {percent:.1f}%")
 
+        model_val = normalize_process_token(ws.cell(r, cols["model_col"]).value)
         if model_val:
             current_model = model_val
-
         model = current_model
         row_text = row_join_text(ws, r)
 
-        first_col_raw = get_merged_value(ws, r, 1)
-        first_col_text = normalize_compact(first_col_raw)
+        row_values = {
+            "customer_part_no": normalize_process_token(ws.cell(r, cols["customer_part_col"]).value) if cols["customer_part_col"] else "",
+            "core_part_no": normalize_process_token(ws.cell(r, cols["core_part_col"]).value) if is_mes and cols["core_part_col"] else "",
+            "tank_part_no": normalize_process_token(ws.cell(r, cols["tank_part_col"]).value) if is_mes and cols["tank_part_col"] else "",
+            "finish_part_no": normalize_process_token(ws.cell(r, cols["finish_part_col"]).value) if cols["finish_part_col"] else "",
+            "accessory_part_no": normalize_process_token(ws.cell(r, cols["accessory_part_col"]).value) if is_mes and cols["accessory_part_col"] else "",
+        }
 
-        # 완성공정 시트 내부의 다른 구역 스킵
-        if (
-            "용접C/M" in first_col_text
-            or "코어C/M" in first_col_text
-            or "선발주-용접C/M" in first_col_text
-        ):
-            continue
+        first_col_raw = (
+            merged_map.get((r, 1), ws.cell(r, 1).value)
+            if is_mes
+            else get_merged_value(ws, r, 1)
+        )
+        first_col_text = normalize_process_token(first_col_raw)
 
-        compact_row = normalize_compact(row_text)
+        if is_mes and ws.title == "완성공정(실적)":
+            if "용접C/M" in first_col_text or "코어C/M" in first_col_text or "선발주-용접C/M" in first_col_text:
+                continue
 
-        # 액세서리 영역 처리
-        if "액세서리&HEATSCREEN" in compact_row:
+        if "액세서리&HEATSCREEN" in normalize_process_token(row_text):
             accessory_mode = True
             continue
 
         if accessory_mode:
-            if first_col_text.startswith("단품"):
+            stop_prefix = "단품" if is_mes else "제외"
+            if first_col_text.startswith(stop_prefix):
                 break
 
-        finish_part_no = normalize_text(ws.cell(r, cols["finish_part_col"]).value)
-        customer_part_no = (
-            normalize_text(ws.cell(r, cols["customer_part_col"]).value)
-            if cols["customer_part_col"]
-            else ""
-        )
+        process_name_raw = ""
+        if accessory_mode and ws.title == "완성공정(실적)":
+            process_name_raw = "액세서리 & HEAT SCREEN"
+        elif cols["process_print_col"]:
+            process_name_raw = normalize_process_token(ws.cell(r, cols["process_print_col"]).value)
 
-        process_print = (
-            normalize_text(ws.cell(r, cols["process_print_col"]).value)
-            if cols["process_print_col"]
-            else ""
-        )
+        if is_mes:
+            if not process_name_raw:
+                process_name_raw = config.get("default_process", "")
 
-        if accessory_mode:
-            process_print = "액세서리 & HEAT SCREEN"
+            workshop_name, team_name = map_workcenter_and_team(process_name_raw)
 
-        part_no = finish_part_no
+            if workshop_name and "액세서리" in workshop_name:
+                workshop_name = "출하-액세서리"
+                team_name = "출하-액세서리"
 
-        if is_skip_summary_row(model, part_no, row_text):
+            if not workshop_name:
+                if config.get("default_process") == "CORE":
+                    workshop_name, team_name = "CORE조립", ""
+                elif config.get("default_process") == "TANK":
+                    workshop_name, team_name = "용접", ""
+                elif config.get("default_process") == "완성":
+                    workshop_name, team_name = "완성조립", ""
+
+            part_no = pick_plan_part_no(workshop_name, row_values)
+            product_key = row_values.get("customer_part_no") or part_no
+        else:
+            part_no = row_values["finish_part_no"]
+            product_key = row_values.get("customer_part_no") or part_no
+
+        if should_skip_row(part_no, process_name_raw, row_text, sheet_title=ws.title, product_key=product_key):
             continue
 
-        if should_skip_row(part_no, process_print, row_text):
+        if is_skip_summary_row(model, part_no, row_text):
             continue
 
         if not model or not part_no:
             continue
 
         for dc in date_cols:
-            qty = ws.cell(r, dc["col"]).value
+            if is_mes and check_red_font and is_red_font_cell(ws, r, dc["col"]):
+                continue
 
+            qty = ws.cell(r, dc["col"]).value
             if qty is None or qty == "":
                 continue
 
             qty_num = safe_float(qty)
-
             if qty_num == 0:
                 continue
 
-            records.append({
-                "시트명": ws.title,
-                "모델": model,
-                "품번": normalize_part_no(part_no),
-                "고객사품번": customer_part_no,
-                "날짜": dc["date"],
-                "구분": dc["kind"],
-                "계획수량": qty_num,
-                "공정인쇄": process_print,
-            })
+            if is_mes:
+                process = map_process_from_workshop(workshop_name)
+                workshop = canonical_workshop_name(workshop_name)
+                team = normalize_process_token(team_name)
+                part_norm = normalize_part_no(part_no)
 
-    return pd.DataFrame(records)
+                records.append({
+                    "비교키": make_compare_key(process, workshop, team, part_norm, dc["date"]),
+                    "시트명": ws.title,
+                    "공정": process,
+                    "작업장명": workshop,
+                    "작업반명": team,
+                    "모델": model,
+                    "품번": part_norm,
+                    "고객사품번": row_values.get("customer_part_no", ""),
+                    "날짜": dc["date"],
+                    "구분": dc["kind"],
+                    "수량": qty_num,
+                    "공정인쇄": process_name_raw,
+                    "원본행": r,
+                    "원본열": dc["col"],
+                })
+            else:
+                records.append({
+                    "시트명": ws.title,
+                    "모델": model,
+                    "품번": normalize_part_no(part_no),
+                    "고객사품번": row_values.get("customer_part_no", ""),
+                    "날짜": dc["date"],
+                    "구분": dc["kind"],
+                    "계획수량": qty_num,
+                    "공정인쇄": process_name_raw,
+                })
+
+    df = pd.DataFrame(records)
+    if df.empty or not is_mes:
+        return df
+
+    return df[df["공정"].notna()].copy()
 
 
-def extract_plan_file(plan_file: str) -> pd.DataFrame:
+def extract_plan_file(plan_file: str, progress=None) -> pd.DataFrame:
     wb = load_workbook(plan_file, data_only=True)
 
     frames = []
 
-    for sheet_name in SHEET_NAME:
+    total = len(SHEET_NAME)
+    for i, sheet_name in enumerate(SHEET_NAME, start=1):
         if sheet_name not in wb.sheetnames:
-            print(f"[건너뜀] 시트 없음: {sheet_name}")
+            if progress:
+                progress(10 + int(i / total * 70), f"{sheet_name} 시트 없음, 건너뜀")
             continue
+
+        if progress:
+            progress(10 + int((i - 1) / total * 70), f"{sheet_name} 계획 추출 중...")
 
         ws = wb[sheet_name]
         df = extract_finish_plan_sheet(ws)
 
-        print(f"[계획 추출 완료] {sheet_name}: {len(df)}건")
+        if progress:
+            progress(10 + int(i / total * 70), f"{sheet_name} 계획 추출 완료: {len(df)}건")
         frames.append(df)
 
     if not frames:
@@ -311,11 +484,11 @@ def main():
     plan_df = extract_plan_file(plan_file)
 
     if plan_df.empty:
-        print("추출된 계획 수량이 없습니다.")
+        messagebox.showinfo("알림", "추출된 계획 수량이 없습니다.")
         return
 
     plan_df.to_excel(OUTPUT_FILE, index=False)
-    print(f"[저장 완료] {OUTPUT_FILE}")
+    messagebox.showinfo("완료", f"저장 완료: {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
