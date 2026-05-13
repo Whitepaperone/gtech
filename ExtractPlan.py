@@ -17,13 +17,11 @@ from AppConstants import (
 )
 from CommonUtils import (
     build_merged_map,
-    get_merged_value,
     header_text,
     is_date_value,
     normalize_kind,
     normalize_part_no,
     normalize_process_token,
-    row_join_text,
     safe_float,
 )
 
@@ -44,9 +42,9 @@ def find_date_start_col(ws) -> Optional[int]:
     return None
 
 
-def find_col_by_keywords(ws, keywords, required: bool = False) -> Optional[int]:
+def find_col_by_keywords(ws, keywords, required: bool = False, date_start_col: Optional[int] = None) -> Optional[int]:
     keys = [k.upper().replace(" ", "") for k in keywords]
-    date_start_col = find_date_start_col(ws) or (ws.max_column + 1)
+    date_start_col = date_start_col or find_date_start_col(ws) or (ws.max_column + 1)
 
     for c in range(1, date_start_col):
         txt = header_text(ws, HEADER_DATE_ROW, c)
@@ -59,6 +57,19 @@ def find_col_by_keywords(ws, keywords, required: bool = False) -> Optional[int]:
         raise RuntimeError(f"{ws.title}: 헤더를 찾지 못했습니다. keywords={keywords}")
 
     return None
+
+
+def build_header_lookup(ws) -> Dict[str, Optional[int]]:
+    date_start_col = find_date_start_col(ws) or (ws.max_column + 1)
+    return {
+        "model_col": find_col_by_keywords(ws, ["모델"], required=True, date_start_col=date_start_col),
+        "customer_part_col": find_col_by_keywords(ws, ["고객사", "품번"], date_start_col=date_start_col),
+        "core_part_col": find_col_by_keywords(ws, ["CORE", "품번"], date_start_col=date_start_col),
+        "tank_part_col": find_col_by_keywords(ws, ["TANK", "품번"], date_start_col=date_start_col),
+        "finish_part_col": find_col_by_keywords(ws, ["완성", "품번"], date_start_col=date_start_col),
+        "accessory_part_col": find_col_by_keywords(ws, ["액세", "품번"], date_start_col=date_start_col),
+        "process_print_col": find_col_by_keywords(ws, ["공정", "인쇄"], date_start_col=date_start_col),
+    }
 
 
 def build_plan_date_columns(ws) -> List[Dict]:
@@ -102,12 +113,10 @@ def build_plan_date_columns(ws) -> List[Dict]:
 
 
 def get_sheet_columns(ws) -> Dict[str, Optional[int]]:
-    return {
-        "model_col": find_col_by_keywords(ws, ["모델"], required=True),
-        "customer_part_col": find_col_by_keywords(ws, ["고객사", "품번"]),
-        "finish_part_col": find_col_by_keywords(ws, ["완성", "품번"], required=True),
-        "process_print_col": find_col_by_keywords(ws, ["공정", "인쇄"]),
-    }
+    cols = build_header_lookup(ws)
+    if not cols["finish_part_col"]:
+        raise RuntimeError(f"{ws.title}: 헤더를 찾지 못했습니다. keywords={['완성', '품번']}")
+    return cols
 
 
 # =========================
@@ -187,15 +196,7 @@ def build_mes_date_columns(ws) -> List[Dict]:
 
 
 def get_mes_sheet_columns(ws) -> Dict[str, Optional[int]]:
-    return {
-        "model_col": find_col_by_keywords(ws, ["모델"], required=True),
-        "customer_part_col": find_col_by_keywords(ws, ["고객사", "품번"]),
-        "core_part_col": find_col_by_keywords(ws, ["CORE", "품번"]),
-        "tank_part_col": find_col_by_keywords(ws, ["TANK", "품번"]),
-        "finish_part_col": find_col_by_keywords(ws, ["완성", "품번"]),
-        "accessory_part_col": find_col_by_keywords(ws, ["액세", "품번"]),
-        "process_print_col": find_col_by_keywords(ws, ["공정", "인쇄"]),
-    }
+    return build_header_lookup(ws)
 
 
 def is_red_font_cell(ws, row: int, col: int) -> bool:
@@ -295,7 +296,7 @@ def extract_plan_sheet(ws, config: Dict, check_red_font: bool = False, progress=
 def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_font: bool = False, progress=None) -> pd.DataFrame:
     is_mes = mode == "mes"
     config = config or {}
-    merged_map = build_merged_map(ws) if is_mes else None
+    merged_map = build_merged_map(ws)
     date_cols = build_mes_date_columns(ws) if is_mes else build_plan_date_columns(ws)
 
     if not date_cols:
@@ -305,32 +306,43 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
     records = []
     current_model = ""
     accessory_mode = False
+    max_col = ws.max_column
+    model_col = cols["model_col"]
+    customer_part_col = cols["customer_part_col"]
+    core_part_col = cols["core_part_col"] if is_mes else None
+    tank_part_col = cols["tank_part_col"] if is_mes else None
+    finish_part_col = cols["finish_part_col"]
+    accessory_part_col = cols["accessory_part_col"] if is_mes else None
+    process_print_col = cols["process_print_col"]
 
-    for r in range(DATA_START_ROW, ws.max_row + 1):
+    for row_cells in ws.iter_rows(min_row=DATA_START_ROW, max_row=ws.max_row, max_col=max_col):
+        r = row_cells[0].row
         if is_mes and (r - DATA_START_ROW) % 200 == 0:
             percent = (r - DATA_START_ROW) / max(ws.max_row - DATA_START_ROW, 1) * 100
             if progress:
                 progress(percent, f"{ws.title} 계획 추출 중... {percent:.1f}%")
 
-        model_val = normalize_process_token(ws.cell(r, cols["model_col"]).value)
+        values = [cell.value for cell in row_cells]
+
+        model_val = normalize_process_token(values[model_col - 1])
         if model_val:
             current_model = model_val
         model = current_model
-        row_text = row_join_text(ws, r)
+        row_text = " ".join(
+            text
+            for text in (normalize_process_token(cell.value) for cell in row_cells)
+            if text
+        )
 
         row_values = {
-            "customer_part_no": normalize_process_token(ws.cell(r, cols["customer_part_col"]).value) if cols["customer_part_col"] else "",
-            "core_part_no": normalize_process_token(ws.cell(r, cols["core_part_col"]).value) if is_mes and cols["core_part_col"] else "",
-            "tank_part_no": normalize_process_token(ws.cell(r, cols["tank_part_col"]).value) if is_mes and cols["tank_part_col"] else "",
-            "finish_part_no": normalize_process_token(ws.cell(r, cols["finish_part_col"]).value) if cols["finish_part_col"] else "",
-            "accessory_part_no": normalize_process_token(ws.cell(r, cols["accessory_part_col"]).value) if is_mes and cols["accessory_part_col"] else "",
+            "customer_part_no": normalize_process_token(values[customer_part_col - 1]) if customer_part_col else "",
+            "core_part_no": normalize_process_token(values[core_part_col - 1]) if core_part_col else "",
+            "tank_part_no": normalize_process_token(values[tank_part_col - 1]) if tank_part_col else "",
+            "finish_part_no": normalize_process_token(values[finish_part_col - 1]) if finish_part_col else "",
+            "accessory_part_no": normalize_process_token(values[accessory_part_col - 1]) if accessory_part_col else "",
         }
 
-        first_col_raw = (
-            merged_map.get((r, 1), ws.cell(r, 1).value)
-            if is_mes
-            else get_merged_value(ws, r, 1)
-        )
+        first_col_raw = merged_map.get((r, 1), values[0])
         first_col_text = normalize_process_token(first_col_raw)
 
         if is_mes and ws.title == "완성공정(실적)":
@@ -349,8 +361,8 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
         process_name_raw = ""
         if accessory_mode and ws.title == "완성공정(실적)":
             process_name_raw = "액세서리 & HEAT SCREEN"
-        elif cols["process_print_col"]:
-            process_name_raw = normalize_process_token(ws.cell(r, cols["process_print_col"]).value)
+        elif process_print_col:
+            process_name_raw = normalize_process_token(values[process_print_col - 1])
 
         if is_mes:
             if not process_name_raw:
@@ -389,7 +401,7 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
             if is_mes and check_red_font and is_red_font_cell(ws, r, dc["col"]):
                 continue
 
-            qty = ws.cell(r, dc["col"]).value
+            qty = values[dc["col"] - 1]
             if qty is None or qty == "":
                 continue
 
