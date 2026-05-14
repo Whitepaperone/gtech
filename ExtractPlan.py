@@ -1,6 +1,7 @@
 from typing import Optional, List, Dict
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from tkcalendar import Calendar
 import pandas as pd
 from openpyxl import load_workbook
 
@@ -293,6 +294,152 @@ def extract_plan_sheet(ws, config: Dict, check_red_font: bool = False, progress=
     return _extract_plan_sheet(ws, mode="mes", config=config, check_red_font=check_red_font, progress=progress)
 
 
+def select_date_range(parent):
+    win = tk.Toplevel(parent)
+    win.title("기간 선택")
+    win.geometry("620x330")
+    win.resizable(False, False)
+
+    selected = {"start": None, "end": None}
+
+    tk.Label(win, text="시작일").grid(row=0, column=0, padx=10, pady=(10, 0))
+    tk.Label(win, text="종료일").grid(row=0, column=1, padx=10, pady=(10, 0))
+
+    cal_start = Calendar(win, selectmode="day", date_pattern="yyyy-mm-dd")
+    cal_start.grid(row=1, column=0, padx=10, pady=10)
+
+    cal_end = Calendar(win, selectmode="day", date_pattern="yyyy-mm-dd")
+    cal_end.grid(row=1, column=1, padx=10, pady=10)
+
+    def confirm():
+        start = pd.to_datetime(cal_start.get_date()).normalize()
+        end = pd.to_datetime(cal_end.get_date()).normalize()
+
+        if start > end:
+            messagebox.showerror("오류", "시작일이 종료일보다 늦습니다.", parent=win)
+            return
+
+        selected["start"] = start
+        selected["end"] = end
+        win.destroy()
+
+    def no_filter():
+        selected["start"] = None
+        selected["end"] = None
+        win.destroy()
+
+    tk.Button(win, text="확인", width=15, command=confirm).grid(row=2, column=0, pady=10)
+    tk.Button(win, text="기간 필터 없이 진행", width=20, command=no_filter).grid(row=2, column=1, pady=10)
+
+    win.protocol("WM_DELETE_WINDOW", no_filter)
+    win.update_idletasks()
+    win.lift()
+    win.attributes("-topmost", True)
+    win.after(300, lambda: win.attributes("-topmost", False))
+    win.focus_force()
+    win.grab_set()
+
+    parent.wait_window(win)
+    return selected["start"], selected["end"]
+
+
+def filter_work_order_period(df: pd.DataFrame, start_date=None, end_date=None) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    date_col = df.columns[8]
+    out = df.copy()
+    out[date_col] = pd.to_datetime(out[date_col], errors="coerce").dt.normalize()
+
+    if start_date is not None:
+        out = out[out[date_col] >= start_date]
+    if end_date is not None:
+        out = out[out[date_col] <= end_date]
+
+    return out.copy()
+
+
+def extract_work_order_file(plan_file: str) -> pd.DataFrame:
+    wb = load_workbook(plan_file, data_only=True)
+    frames = []
+
+    for sheet_name, config in MES_SHEET_CONFIG.items():
+        if sheet_name not in wb.sheetnames:
+            continue
+
+        df_sheet = extract_plan_sheet(wb[sheet_name], config, check_red_font=True)
+        if not df_sheet.empty:
+            frames.append(df_sheet)
+
+    if not frames:
+        return pd.DataFrame()
+
+    return pd.concat(frames, ignore_index=True)
+
+
+def build_work_order_upload_df(plan_df: pd.DataFrame) -> pd.DataFrame:
+    output_columns = ["작업장명", "작업반명", "모델", "품번", "공정 인쇄"]
+
+    if plan_df.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    cols = list(plan_df.columns)
+    workcenter_col = cols[3]
+    team_col = cols[4]
+    model_col = cols[5]
+    part_col = cols[6]
+    date_col = cols[8]
+    kind_col = cols[9]
+    qty_col = cols[10]
+    process_print_col = cols[11]
+
+    df = plan_df.copy()
+    plan_kind = normalize_kind("계획") or "계획"
+    df = df[df[kind_col].apply(normalize_kind).fillna(df[kind_col]) == plan_kind].copy()
+    if df.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce").dt.normalize()
+    df[part_col] = df[part_col].apply(normalize_part_no)
+    df = df[~df[part_col].isin(["", "NAN", "NONE"])].copy()
+    df[qty_col] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0)
+    df = df[df[qty_col] != 0].copy()
+
+    grouped = (
+        df.groupby(
+            [workcenter_col, team_col, model_col, part_col, process_print_col, date_col],
+            as_index=False,
+            dropna=False,
+        )[qty_col]
+        .sum()
+    )
+
+    wide = grouped.pivot_table(
+        index=[workcenter_col, team_col, model_col, part_col, process_print_col],
+        columns=date_col,
+        values=qty_col,
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
+
+    date_columns = sorted([c for c in wide.columns if isinstance(c, pd.Timestamp)])
+    wide = wide[[workcenter_col, team_col, model_col, part_col, process_print_col] + date_columns]
+    wide = wide.rename(
+        columns={
+            workcenter_col: "작업장명",
+            team_col: "작업반명",
+            model_col: "모델",
+            part_col: "품번",
+            process_print_col: "공정 인쇄",
+        }
+    )
+    wide = wide.rename(columns={c: c.strftime("%Y/%m/%d") for c in date_columns})
+
+    qty_cols = [c for c in wide.columns if c not in output_columns]
+    wide = wide[(wide[qty_cols] != 0).any(axis=1)].copy()
+    return wide.reset_index(drop=True)
+
+
 def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_font: bool = False, progress=None) -> pd.DataFrame:
     is_mes = mode == "mes"
     config = config or {}
@@ -412,7 +559,7 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
             if is_mes:
                 process = map_process_from_workshop(workshop_name)
                 workshop = canonical_workshop_name(workshop_name)
-                team = normalize_process_token(team_name)
+                team = team_name or ""
                 part_norm = normalize_part_no(part_no)
 
                 records.append({

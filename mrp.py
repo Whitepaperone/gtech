@@ -3,6 +3,8 @@ import pandas as pd
 from tkinter import Tk, filedialog, messagebox
 from datetime import datetime
 
+from CommonUtils import apply_quantities_by_part_left_to_right, load_actual_quantities_by_part
+
 OUTPUT_FILE = "./output.xlsx"
 
 
@@ -78,31 +80,6 @@ def adjust_row(values):
                 result[i] = 0
 
     return result
-def apply_today_result(row, today_dict):    
-    product = row["품번"]
-
-    if product not in today_dict:
-        return row
-
-    remain = today_dict[product]
-
-    values = row[3:].tolist()
-
-    for i in range(len(values)):
-        if remain <= 0:
-            break
-
-        if values[i] > 0:
-            if values[i] >= remain:
-                values[i] -= remain
-                remain = 0
-            else:
-                remain -= values[i]
-                values[i] = 0
-
-    row[3:] = values
-    return row
-
 def main():
     Tk().withdraw()
 
@@ -126,16 +103,7 @@ def main():
 
         start_row = find_data_start_row(df, start_col, end_col)
 
-            
-        today_df = pd.read_excel(OUTPUT_FILE)  # 시트 이름 또는 index
-
-        # 품번 / 수량 컬럼 맞게 수정 필요
-        today_df = today_df[["품번", "실적수량"]]
-
-        today_df["품번"] = today_df["품번"].astype(str).str.strip()
-
-        today_grouped = today_df.groupby("품번")["실적수량"].sum().to_dict()
-
+        today_grouped = load_actual_quantities_by_part(OUTPUT_FILE)
 
         product_col = start_col - 1
         customer_code_col = start_col - 2
@@ -189,7 +157,12 @@ def main():
         # 🔥 품번 기준 그룹화 + 합계
         result_df["품번"] = result_df["품번"].astype(str).str.strip()
         result_df = result_df.groupby("품번", as_index=False).agg(agg_dict)
-        result_df = result_df.apply(lambda row: apply_today_result(row, today_grouped), axis=1)
+        result_df = apply_quantities_by_part_left_to_right(
+            result_df,
+            today_grouped,
+            part_col="품번",
+            value_start_idx=3,
+        )
         result_df = result_df[(result_df.iloc[:, 3:] != 0).any(axis=1)]
 
         # 숫자 날짜 컬럼

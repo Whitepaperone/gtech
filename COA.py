@@ -1,4 +1,3 @@
-from datetime import datetime
 from tkinter import messagebox
 import tkinter as tk
 from tkinter import filedialog
@@ -6,7 +5,12 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from AppConstants import COA_EXCLUDE_CUSTOMERS, FINISH_PLAN_SHEET_NAMES
-from CommonUtils import create_progress_window, normalize_part_no, normalize_process_token
+from CommonUtils import (
+    create_progress_window,
+    normalize_part_no,
+    normalize_process_token,
+    select_excel_save_file,
+)
 from ExtractPlan import extract_finish_plan_sheet as extract_finish_plan_sheet_from_module
 
 
@@ -294,12 +298,7 @@ def main():
         mapping_file = None
 
 
-    save_file = filedialog.asksaveasfilename(
-        title="결과 파일 저장",
-        initialfile=f"생산계획_COA수주_비교_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-        defaultextension=".xlsx",
-        filetypes=[("Excel files", "*.xlsx *.xlsm *.xls")]
-    )
+    save_file = select_excel_save_file("결과 파일 저장", plan_file, "COA수주_비교", root)
     if not save_file:
         messagebox.showinfo("알림", "저장할 파일을 선택하지 않았습니다. 결과 저장 없이 종료합니다.")
         return

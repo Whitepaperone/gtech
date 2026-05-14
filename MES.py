@@ -203,7 +203,7 @@ def extract_mes(mes_file: str) -> pd.DataFrame:
     df["실적량"] = pd.to_numeric(df["실적량"], errors="coerce").fillna(0)
     df["작업장명"] = df["작업장명"].apply(canonical_workshop_name)
     df["품번"] = df["품번"].apply(normalize_part_no)
-    df["작업반명"] = df["작업반명"].apply(normalize_process_token)
+    df["작업반명"] = df["작업반명"].fillna("").astype(str).str.strip()
 
     df["비교키"] = df.apply(
         lambda x: make_compare_key(

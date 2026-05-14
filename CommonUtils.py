@@ -1,4 +1,5 @@
 from datetime import datetime, date
+from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Optional
 import tkinter as tk
@@ -6,10 +7,20 @@ import tkinter as tk
 import pandas as pd
 
 
-def select_excel_file(title, parent=None):
+def select_excel_file(title, parent=None, initial_path=None):
+    initialdir = None
+    initialfile = None
+
+    if initial_path:
+        path = Path(initial_path).resolve()
+        initialdir = str(path.parent)
+        initialfile = path.name
+
     return filedialog.askopenfilename(
         parent=parent,
         title=title,
+        initialdir=initialdir,
+        initialfile=initialfile,
         filetypes=[("Excel files", "*.xlsx *.xls")],
     )
 
@@ -123,3 +134,90 @@ def filter_by_period(df: pd.DataFrame, start_date=None, end_date=None) -> pd.Dat
         out = out[out["날짜"] <= end_date]
 
     return out.copy()
+
+
+def normalize_header_token(v) -> str:
+    return str(v or "").strip().upper().replace(" ", "").replace("\n", "").replace("\r", "")
+
+
+def find_column_by_keywords(df: pd.DataFrame, keywords):
+    normalized_keywords = [normalize_header_token(k) for k in keywords]
+
+    for col in df.columns:
+        text = normalize_header_token(col)
+        if all(k in text for k in normalized_keywords):
+            return col
+
+    return None
+
+
+def load_actual_quantities_by_part(
+    result_file: str,
+    part_keywords=("품번",),
+    qty_keywords=("실적", "수량"),
+) -> dict:
+    df = pd.read_excel(result_file)
+    part_col = find_column_by_keywords(df, part_keywords)
+    qty_col = find_column_by_keywords(df, qty_keywords)
+
+    if part_col is None or qty_col is None:
+        raise RuntimeError("실적 파일에 품번/실적수량 컬럼이 없습니다.")
+
+    df = df[[part_col, qty_col]].copy()
+    df[part_col] = df[part_col].apply(normalize_part_no)
+    df[qty_col] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0)
+    df = df[df[part_col] != ""]
+
+    return df.groupby(part_col)[qty_col].sum().to_dict()
+
+
+def apply_quantities_by_part_left_to_right(
+    df: pd.DataFrame,
+    quantities_by_part: dict,
+    part_col,
+    value_start_idx: int,
+) -> pd.DataFrame:
+    if df.empty or not quantities_by_part:
+        return df
+
+    out = df.copy()
+    part_col_name = out.columns[part_col] if isinstance(part_col, int) else part_col
+
+    for idx, row in out.iterrows():
+        part_no = normalize_part_no(row[part_col_name])
+        remain = safe_float(quantities_by_part.get(part_no, 0))
+        if remain <= 0:
+            continue
+
+        for col in out.columns[value_start_idx:]:
+            if remain <= 0:
+                break
+
+            qty = safe_float(out.at[idx, col])
+            if qty <= 0:
+                continue
+
+            used = min(qty, remain)
+            out.at[idx, col] = qty - used
+            remain -= used
+
+    value_cols = out.columns[value_start_idx:]
+    return out[(out[value_cols] != 0).any(axis=1)].reset_index(drop=True)
+
+
+def timestamped_filename(source_file: str, suffix: str, ext: str = ".xlsx") -> str:
+    source_path = Path(source_file)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{source_path.stem}_{suffix}_{timestamp}{ext}"
+
+
+def select_excel_save_file(title: str, source_file: str, suffix: str, parent=None):
+    source_path = Path(source_file)
+    return filedialog.asksaveasfilename(
+        parent=parent,
+        title=title,
+        initialdir=str(source_path.parent),
+        initialfile=timestamped_filename(source_file, suffix),
+        defaultextension=".xlsx",
+        filetypes=[("Excel files", "*.xlsx")],
+    )
