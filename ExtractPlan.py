@@ -157,6 +157,11 @@ def should_skip_row(part_no, process_name, row_text="", sheet_title: str = "", p
     return False
 
 
+def starts_with_alpha_part_no(part_no) -> bool:
+    part_txt = normalize_process_token(part_no)
+    return bool(part_txt) and part_txt[0].isalpha() and part_txt[0].isascii()
+
+
 # =========================
 # 생산계획 추출
 # =========================
@@ -544,6 +549,9 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
         if not model or not part_no:
             continue
 
+        if not starts_with_alpha_part_no(part_no):
+            continue
+
         for dc in date_cols:
             if is_mes and check_red_font and is_red_font_cell(ws, r, dc["col"]):
                 continue
@@ -558,6 +566,7 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
 
             if is_mes:
                 process = map_process_from_workshop(workshop_name)
+                workshop_raw = workshop_name or ""
                 workshop = canonical_workshop_name(workshop_name)
                 team = team_name or ""
                 part_norm = normalize_part_no(part_no)
@@ -566,7 +575,7 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
                     "비교키": make_compare_key(process, workshop, team, part_norm, dc["date"]),
                     "시트명": ws.title,
                     "공정": process,
-                    "작업장명": workshop,
+                    "작업장명": workshop_raw,
                     "작업반명": team,
                     "모델": model,
                     "품번": part_norm,
