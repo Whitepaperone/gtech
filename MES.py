@@ -187,34 +187,39 @@ def extract_mes(mes_file: str) -> pd.DataFrame:
         raise RuntimeError(f"MES 파일에 필요한 컬럼이 없습니다: {missing}")
 
     df = df[needed].copy()
-    df["작업장명"] = df["작업장명"].map(canonical_workshop_name)
-    df["공정"] = df["작업장명"].map(map_process_from_workshop)
+    df["작업장명"] = df["작업장명"].fillna("").astype(str).str.strip()
+    df["작업반명"] = df["작업반명"].fillna("").astype(str).str.strip()
+
+    workshop_for_compare = df["작업장명"].map(canonical_workshop_name)
+    df["공정"] = workshop_for_compare.map(map_process_from_workshop)
 
     # 악세서리 계열 통일
-    accessory_mask = df["작업장명"].astype(str).str.contains("액세서리", na=False)
-    df.loc[accessory_mask, "작업장명"] = "출하-액세서리"
-    df.loc[accessory_mask, "작업반명"] = "출하-액세서리"
+    accessory_mask = workshop_for_compare.astype(str).str.contains("액세서리", na=False)
+    workshop_for_compare = workshop_for_compare.mask(accessory_mask, "출하-액세서리")
+    team_for_compare = df["작업반명"].mask(accessory_mask, "출하-액세서리")
 
     df = df[df["공정"].notna()].copy()
+    workshop_for_compare = workshop_for_compare.loc[df.index]
+    team_for_compare = team_for_compare.loc[df.index]
     df = df[df["작업지시상태"] != "종료"].copy()
+    workshop_for_compare = workshop_for_compare.loc[df.index]
+    team_for_compare = team_for_compare.loc[df.index]
 
     df["날짜"] = pd.to_datetime(df["계획일"], errors="coerce").dt.normalize()
     df["지시량"] = pd.to_numeric(df["지시량"], errors="coerce").fillna(0)
     df["실적량"] = pd.to_numeric(df["실적량"], errors="coerce").fillna(0)
-    df["작업장명"] = df["작업장명"].apply(canonical_workshop_name)
     df["품번"] = df["품번"].apply(normalize_part_no)
-    df["작업반명"] = df["작업반명"].fillna("").astype(str).str.strip()
 
-    df["비교키"] = df.apply(
-        lambda x: make_compare_key(
-            x["공정"],
-            x["작업장명"],
-            x["작업반명"],
-            x["품번"],
-            x["날짜"]
-        ),
-        axis=1
-    )
+    df["비교키"] = [
+        make_compare_key(process, workshop, team, part_no, day)
+        for process, workshop, team, part_no, day in zip(
+            df["공정"],
+            workshop_for_compare,
+            team_for_compare,
+            df["품번"],
+            df["날짜"],
+        )
+    ]
 
     grouped = (
         df.groupby(["비교키", "공정", "작업장명", "작업반명", "품번", "날짜"], as_index=False)
@@ -319,7 +324,8 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
     plan = plan_df.copy()
     mes = mes_df.copy()
 
-    key_cols = ["비교키", "공정", "작업장명", "작업반명", "품번", "날짜"]
+    key_cols = ["비교키"]
+    display_cols = ["공정", "작업장명", "작업반명", "품번", "날짜"]
 
     # =========================
     # 기본 정규화
@@ -352,6 +358,18 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
     # =========================
     # 계획 피벗: 미달/계획/실적 분리
     # =========================
+    plan_display = (
+        plan.sort_values(display_cols)
+        .groupby(key_cols, as_index=False)
+        .agg({
+            "공정": "first",
+            "작업장명": "first",
+            "작업반명": "first",
+            "품번": "first",
+            "날짜": "first",
+        })
+    )
+
     pivot = (
         plan.groupby(key_cols + ["구분"], as_index=False)
             .agg(수량=("수량", "sum"))
@@ -364,6 +382,7 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
             )
             .reset_index()
     )
+    pivot = pivot.merge(plan_display, on=key_cols, how="left")
 
     for col in ["계획", "미달", "실적"]:
         if col not in pivot.columns:
@@ -408,6 +427,20 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
         "지시량": "작업지시수량",
         "실적량": "MES실적량_원본"
     })
+
+    mes2 = (
+        mes2.sort_values(display_cols)
+        .groupby(key_cols, as_index=False)
+        .agg({
+            "공정": "first",
+            "작업장명": "first",
+            "작업반명": "first",
+            "품번": "first",
+            "날짜": "first",
+            "작업지시수량": "sum",
+            "MES실적량_원본": "sum",
+        })
+    )
 
     pivot = pivot.merge(
         mes2[key_cols + ["작업지시수량", "MES실적량_원본"]],
