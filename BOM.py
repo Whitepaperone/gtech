@@ -3,6 +3,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from tkinter import Tk, filedialog, messagebox
 from datetime import datetime
+from CommonUtils import create_progress_window
 
 # =========================
 # 설정값
@@ -20,6 +21,10 @@ SUP_NAME_COL = "거래처명"
 
 PLAN_PART_COL_INDEX = 5     # F열
 PLAN_QTY_COL_INDEX = 52     # BA열
+
+HIGHLIGHT_COL = "__BOM_HIGHLIGHT__"
+HIGHLIGHT_PLAN = "plan"
+HIGHLIGHT_CHILD = "child"
 
 
 # =========================
@@ -114,6 +119,34 @@ def filter_bom_with_children(bom_df, planned_parts):
 
     return bom_df.iloc[sorted(set(keep_indexes))].copy()
 
+
+def mark_bom_plan_hierarchy(bom_df, planned_parts):
+    """
+    전체 BOM은 유지하고, 계획 품번 행과 해당 하위 레벨 행만 색칠 대상으로 표시한다.
+    """
+
+    result_df = bom_df.copy()
+    levels = pd.to_numeric(result_df[BOM_LEVEL_COL], errors="coerce")
+    parts = result_df["품번정리"]
+    marks = []
+    planned_level_stack = []
+
+    for part, level in zip(parts, levels):
+        if pd.notna(level):
+            while planned_level_stack and level <= planned_level_stack[-1]:
+                planned_level_stack.pop()
+
+        if part in planned_parts and pd.notna(level):
+            marks.append(HIGHLIGHT_PLAN)
+            planned_level_stack.append(level)
+        elif planned_level_stack:
+            marks.append(HIGHLIGHT_CHILD)
+        else:
+            marks.append("")
+
+    result_df[HIGHLIGHT_COL] = marks
+    return result_df
+
 def move_column_after(df, column_name, after_column):
     cols = list(df.columns)
 
@@ -126,48 +159,61 @@ def move_column_after(df, column_name, after_column):
 
     return df[cols]
 
-def format_result_excel(file_path):
+def format_result_excel(file_path, progress=None):
     wb = load_workbook(file_path)
     ws = wb.active
 
-    # 레벨 컬럼 찾기
-    level_col = None
+    if progress:
+        progress(82, "결과 엑셀 서식 적용 준비 중...")
+
+    # 색칠 표시 컬럼 찾기
+    highlight_col = None
     for cell in ws[1]:
-        if cell.value == "레벨":
-            level_col = cell.column
+        if cell.value == HIGHLIGHT_COL:
+            highlight_col = cell.column
             break
 
     # 기본 스타일
+    max_row = max(ws.max_row, 1)
     for row in ws.iter_rows():
+        if progress and row[0].row % 200 == 0:
+            percent = 82 + int(row[0].row / max_row * 8)
+            progress(percent, f"기본 서식 적용 중... {row[0].row}/{max_row}")
+
         for cell in row:
             cell.font = Font(name="맑은 고딕", size=10)
             cell.alignment = Alignment(
                 vertical="center",
             )
 
-    # 레벨 0 행 색칠
-    if level_col:
-        fill = PatternFill(
-            fill_type="solid",
-            fgColor="FFF2CC"  # 연노랑
-        )
+    # 계획 품번은 연노랑, 하위 레벨은 연하늘로 색칠
+    if highlight_col:
+        plan_fill = PatternFill(fill_type="solid", fgColor="FFF2CC")   # 연노랑
+        child_fill = PatternFill(fill_type="solid", fgColor="DDEBF7")  # 연하늘
 
         for row in range(2, ws.max_row + 1):
-            level_value = ws.cell(row=row, column=level_col).value
+            if progress and row % 200 == 0:
+                percent = 90 + int(row / max_row * 6)
+                progress(percent, f"계획 품번 색상 적용 중... {row}/{max_row}")
 
-            try:
-                is_level_zero = int(level_value) == 0
-            except:
-                is_level_zero = False
+            highlight_value = ws.cell(row=row, column=highlight_col).value
 
-            if is_level_zero:
+            if highlight_value == HIGHLIGHT_PLAN:
                 for col in range(1, ws.max_column + 1):
-                    ws.cell(row=row, column=col).fill = fill
+                    ws.cell(row=row, column=col).fill = plan_fill
                     ws.cell(row=row, column=col).font = Font(
                         name="맑은 고딕",
                         size=10,
                         bold=True
                     )
+            elif highlight_value == HIGHLIGHT_CHILD:
+                for col in range(1, ws.max_column + 1):
+                    ws.cell(row=row, column=col).fill = child_fill
+
+        ws.delete_cols(highlight_col)
+
+    if progress:
+        progress(98, "결과 엑셀 저장 중...")
 
     wb.save(file_path)
     wb.close()
@@ -208,74 +254,93 @@ def main():
     if not save_file:
         return
 
-    # =========================
-    # BOM 기준 재고 현황
-    # =========================
+    progress_win, progress = create_progress_window(root, "BOM 결과 생성 진행")
 
-    bom_df = pd.read_excel(bom_file)
-    bom_df["품번정리"] = bom_df[BOM_PART_COL].apply(clean_part_no)
+    try:
+        # =========================
+        # BOM 기준 재고 현황
+        # =========================
 
-    # =========================
-    # 재고실사조정 - 재공만 추출
-    # =========================
+        progress(5, "BOM 기준 재고 현황 읽는 중...")
+        bom_df = pd.read_excel(bom_file)
+        bom_df["품번정리"] = bom_df[BOM_PART_COL].apply(clean_part_no)
 
-    adj_df = pd.read_excel(adj_file)
-    adj_df["품번정리"] = adj_df[ADJ_PART_COL].apply(clean_part_no)
+        # =========================
+        # 재고실사조정 - 재공만 추출
+        # =========================
 
-    wip_df = adj_df[
-        adj_df[ADJ_LOT_TYPE_COL].astype(str).str.strip() == "재공"
-    ].copy()
+        progress(20, "재고실사조정 파일 읽는 중...")
+        adj_df = pd.read_excel(adj_file)
+        adj_df["품번정리"] = adj_df[ADJ_PART_COL].apply(clean_part_no)
 
-    wip_sum = (
-        wip_df
-        .groupby("품번정리", as_index=False)[ADJ_QTY_COL]
-        .sum()
-        .rename(columns={ADJ_QTY_COL: "재공"})
-    )
+        progress(32, "재공 수량 집계 중...")
+        wip_df = adj_df[
+            adj_df[ADJ_LOT_TYPE_COL].astype(str).str.strip() == "재공"
+        ].copy()
 
-    bom_df = bom_df.merge(wip_sum, on="품번정리", how="left")
-    bom_df["재공"] = bom_df["재공"].fillna(0)
+        wip_sum = (
+            wip_df
+            .groupby("품번정리", as_index=False)[ADJ_QTY_COL]
+            .sum()
+            .rename(columns={ADJ_QTY_COL: "재공"})
+        )
 
-    # =========================
-    # 협력사 정보 삽입
-    # =========================
+        bom_df = bom_df.merge(wip_sum, on="품번정리", how="left")
+        bom_df["재공"] = bom_df["재공"].fillna(0)
 
-    sup_df = pd.read_excel(supplier_file)
-    sup_df["품번정리"] = sup_df[SUP_PART_COL].apply(clean_part_no)
+        # =========================
+        # 협력사 정보 삽입
+        # =========================
 
-    sup_df = sup_df[["품번정리", SUP_NAME_COL]].drop_duplicates("품번정리")
-    sup_df = sup_df.rename(columns={SUP_NAME_COL: "협력사"})
+        progress(45, "협력사 정보 읽는 중...")
+        sup_df = pd.read_excel(supplier_file)
+        sup_df["품번정리"] = sup_df[SUP_PART_COL].apply(clean_part_no)
 
-    bom_df = bom_df.merge(sup_df, on="품번정리", how="left")
+        progress(55, "협력사 정보 병합 중...")
+        sup_df = sup_df[["품번정리", SUP_NAME_COL]].drop_duplicates("품번정리")
+        sup_df = sup_df.rename(columns={SUP_NAME_COL: "협력사"})
 
-    # =========================
-    # 계획 품번 읽기
-    # =========================
+        bom_df = bom_df.merge(sup_df, on="품번정리", how="left")
 
-    planned_parts, plan_qty_df = read_plan_file(plan_file)
+        # =========================
+        # 계획 품번 읽기
+        # =========================
 
-    # =========================
-    # 계획 품번 + 하위레벨 유지
-    # =========================
+        progress(65, "계획 수량 파일 읽는 중...")
+        planned_parts, plan_qty_df = read_plan_file(plan_file)
 
-    bom_df = bom_df.drop(columns=["계획수량"], errors="ignore")
-    bom_df = bom_df.merge(plan_qty_df, on="품번정리", how="left")
-    bom_df["계획수량"] = bom_df["계획수량"].fillna(0)
+        # =========================
+        # 전체 BOM 유지 + 계획 품번/하위레벨 색칠 대상 표시
+        # =========================
 
-    result_df = filter_bom_with_children(bom_df, planned_parts)
+        progress(72, "계획 수량 병합 중...")
+        bom_df = bom_df.drop(columns=["계획수량"], errors="ignore")
+        bom_df = bom_df.merge(plan_qty_df, on="품번정리", how="left")
+        bom_df["계획수량"] = bom_df["계획수량"].fillna(0)
 
-    # 정리용 컬럼 제거
-    result_df = result_df.drop(columns=["품번정리"], errors="ignore")
+        progress(76, "계획 품번 하위 레벨 표시 중...")
+        result_df = mark_bom_plan_hierarchy(bom_df, planned_parts)
 
-    result_df = move_column_after(result_df, "협력사", "품번")
-    result_df = move_column_after(result_df, "계획수량", "소요량")
-    result_df = move_column_after(result_df, "재공", "재고량")
+        # 정리용 컬럼 제거
+        result_df = result_df.drop(columns=["품번정리"], errors="ignore")
 
-    result_df.to_excel(save_file, index=False)
+        result_df = move_column_after(result_df, "협력사", "품번")
+        result_df = move_column_after(result_df, "계획수량", "소요량")
+        result_df = move_column_after(result_df, "재공", "재고량")
 
-    format_result_excel(save_file)
+        progress(80, "결과 엑셀 파일 생성 중...")
+        result_df.to_excel(save_file, index=False)
 
-    messagebox.showinfo("완료", f"결과 파일 생성 완료\n\n{save_file}")
+        format_result_excel(save_file, progress=progress)
+
+        progress(100, "완료")
+        progress_win.destroy()
+        messagebox.showinfo("완료", f"결과 파일 생성 완료\n\n{save_file}")
+
+    except Exception as e:
+        progress_win.destroy()
+        messagebox.showerror("오류", f"처리 중 오류가 발생했습니다.\n\n{e}")
+        raise
 
 
 if __name__ == "__main__":
