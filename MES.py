@@ -508,9 +508,10 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
             mes_actual_for_compare = mes_actual_qty - deduct_today
             today_actual_remain -= deduct_today
 
-            # 음수 미달 = 선생산
+            # 음수 미달 = 선생산 잔량 스냅샷.
+            # 실적이 없으면 같은 음수 미달이 이어지므로 누적하지 않고 현재 잔량으로 갱신한다.
             if midal_qty < 0:
-                prebuild_pool += abs(midal_qty)
+                prebuild_pool = abs(midal_qty)
 
             # 현재 미완료 계획 잔량
             open_remain_sum = sum(p["remain"] for p in open_plans)
@@ -718,18 +719,59 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
     mes_only = mes2.merge(plan_keys, on=key_cols, how="left")
     mes_only = mes_only[mes_only["계획존재"].isna()].copy()
 
-    future_midal_allowance = {}
-    positive_midal = pivot[pivot["미달수량"] > 0].copy()
+    midal_history = {}
+    for gkey, h in pivot.groupby("FIFO그룹키", dropna=False, sort=False):
+        midal_history[gkey] = h.sort_values("날짜").copy()
 
-    for _, r in positive_midal.iterrows():
-        gkey = make_fifo_group_key(
-            r["공정"],
-            r["작업장명"],
-            r["작업반명"],
-            r["품번"]
-        )
+    def remaining_midal_until(gkey, day) -> float:
+        """
+        양수 미달은 날짜별 잔량 스냅샷으로 보고, 이후 계획표 실적이 있으면 먼저 차감한다.
+        같은 미달이 여러 날짜에 반복 표시되어도 누적하지 않는다.
+        """
+        history = midal_history.get(gkey)
+        if history is None or history.empty:
+            return 0
 
-        future_midal_allowance[gkey] = future_midal_allowance.get(gkey, 0) + safe_float(r["미달수량"])
+        day = pd.to_datetime(day, errors="coerce").normalize()
+        remain = 0
+
+        for _, hrow in history[history["날짜"] <= day].iterrows():
+            midal_qty = safe_float(hrow["미달수량"])
+            actual_qty = abs(safe_float(hrow["계획표실적수량"]))
+
+            if midal_qty > 0:
+                remain = midal_qty
+            elif midal_qty < 0:
+                remain = 0
+
+            if actual_qty > 0 and remain > 0:
+                remain = max(0, remain - actual_qty)
+
+        return remain
+
+    def remaining_midal_for_mes_only(gkey, day) -> float:
+        """
+        계획표 기간보다 앞선 MES 작업지시는 이후 첫 미달 잔량으로 설명할 수 있다.
+        단, 이미 양수 미달이 나타난 뒤 해소된 경우에는 미래 작업지시를 다시 인정하지 않는다.
+        """
+        history = midal_history.get(gkey)
+        if history is None or history.empty:
+            return 0
+
+        day = pd.to_datetime(day, errors="coerce").normalize()
+        past_history = history[history["날짜"] <= day]
+        if (past_history["미달수량"].apply(lambda x: safe_float(x) > 0)).any():
+            return remaining_midal_until(gkey, day)
+
+        future_history = history[history["날짜"] > day]
+        for _, hrow in future_history.iterrows():
+            midal_qty = safe_float(hrow["미달수량"])
+            if midal_qty > 0:
+                return max(0, midal_qty - abs(safe_float(hrow["계획표실적수량"])))
+            if midal_qty < 0:
+                return 0
+
+        return 0
 
     if not mes_only.empty:
         mes_only["공정인쇄"] = ""
@@ -744,7 +786,7 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
         mes_only["전일마감기준실적수량"] = mes_only["MES실적수량"]
         mes_only["계획대비실적수량"] = 0
 
-        remain_future_midal = future_midal_allowance.copy()
+        used_midal_by_group = {}
         judge_list = []
 
         mes_only = mes_only.sort_values(["공정", "작업장명", "작업반명", "품번", "날짜"]).copy()
@@ -758,11 +800,15 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
             )
 
             work_qty = safe_float(r["작업지시수량"])
-            remain_midal = remain_future_midal.get(gkey, 0)
+            remain_midal = max(
+                0,
+                remaining_midal_for_mes_only(gkey, r["날짜"])
+                - used_midal_by_group.get(gkey, 0)
+            )
 
             if remain_midal > 0:
                 use_qty = min(remain_midal, work_qty)
-                remain_future_midal[gkey] -= use_qty
+                used_midal_by_group[gkey] = used_midal_by_group.get(gkey, 0) + use_qty
 
                 if work_qty <= remain_midal:
                     judge = "일치"
