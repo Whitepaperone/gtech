@@ -183,26 +183,28 @@ def apply_quantities_by_part_left_to_right(
     out = df.copy()
     part_col_name = out.columns[part_col] if isinstance(part_col, int) else part_col
 
+    value_col_positions = range(value_start_idx, len(out.columns))
+
     for idx, row in out.iterrows():
         part_no = normalize_part_no(row[part_col_name])
         remain = safe_float(quantities_by_part.get(part_no, 0))
         if remain <= 0:
             continue
 
-        for col in out.columns[value_start_idx:]:
+        for col_pos in value_col_positions:
             if remain <= 0:
                 break
 
-            qty = safe_float(out.at[idx, col])
+            qty = safe_float(out.iat[idx, col_pos])
             if qty <= 0:
                 continue
 
             used = min(qty, remain)
-            out.at[idx, col] = qty - used
+            out.iat[idx, col_pos] = qty - used
             remain -= used
 
-    value_cols = out.columns[value_start_idx:]
-    return out[(out[value_cols] != 0).any(axis=1)].reset_index(drop=True)
+    value_values = out.iloc[:, value_start_idx:]
+    return out[(value_values != 0).any(axis=1)].reset_index(drop=True)
 
 
 def timestamped_filename(source_file: str, suffix: str, ext: str = ".xlsx") -> str:

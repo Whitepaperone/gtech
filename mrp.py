@@ -8,6 +8,48 @@ from CommonUtils import apply_quantities_by_part_left_to_right, load_actual_quan
 OUTPUT_FILE = "./output.xlsx"
 
 
+def is_date_header_value(value):
+    if pd.isna(value):
+        return False
+
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return True
+
+    if isinstance(value, str):
+        text = value.strip()
+        if "/" in text or "-" in text:
+            return not pd.isna(pd.to_datetime(text, errors="coerce"))
+        return False
+
+    # Plain production quantities like 5, 12, 100 are not date headers.
+    # Real Excel serial dates are normally large numbers around 40000+.
+    if isinstance(value, (int, float)) and value > 20000:
+        return not pd.isna(pd.to_datetime(value, unit="D", origin="1899-12-30", errors="coerce"))
+
+    return False
+
+
+def format_date_header(value):
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+
+    if isinstance(value, (datetime, pd.Timestamp)):
+        dt = pd.to_datetime(value)
+        if dt.year == datetime.now().year:
+            return f"{dt.month}/{dt.day}"
+        return f"{dt.year}/{dt.month}/{dt.day}"
+
+    if isinstance(value, (int, float)) and value > 20000:
+        dt = pd.to_datetime(value, unit="D", origin="1899-12-30")
+        if dt.year == datetime.now().year:
+            return f"{dt.month}/{dt.day}"
+        return f"{dt.year}/{dt.month}/{dt.day}"
+
+    return str(value).strip()
+
+
 def find_date_columns(df):
     """
     날짜 열 자동 탐지
@@ -18,14 +60,10 @@ def find_date_columns(df):
         date_cols = []
 
         for i, val in enumerate(row):
-            if pd.isna(val):
-                continue
-
-            dt = pd.to_datetime(val, errors="coerce")
-            if not pd.isna(dt):
+            if is_date_header_value(val):
                 date_cols.append(i)
 
-        if len(date_cols) > 5:
+        if len(date_cols) >= 5:
             return row_idx, date_cols
 
     raise Exception("날짜 열을 찾을 수 없습니다.")
@@ -112,8 +150,12 @@ def main():
 
         date_row = df.iloc[date_row_idx, date_cols].tolist()
         date_row = [
-            pd.to_datetime(d).strftime("%Y/%m/%d")
+            format_date_header(d)
             for d in date_row
+        ]
+        date_internal_cols = [
+            f"__date_{idx}"
+            for idx in range(len(date_row))
         ]
 
         processed_rows = []
@@ -144,7 +186,7 @@ def main():
         # 🔥 DataFrame으로 변환
         result_df = pd.DataFrame(processed_rows)
 
-        result_df.columns = ["모델", "고객사 품번", "품번"] + date_row
+        result_df.columns = ["모델", "고객사 품번", "품번"] + date_internal_cols
 
         result_df.iloc[:, 3:] = result_df.iloc[:, 3:].apply(pd.to_numeric, errors='coerce').fillna(0)
 
@@ -164,6 +206,19 @@ def main():
             value_start_idx=3,
         )
         result_df = result_df[(result_df.iloc[:, 3:] != 0).any(axis=1)]
+
+        output_date_cols = []
+        seen_dates = {}
+        for date_label in date_row:
+            seen_dates[date_label] = seen_dates.get(date_label, 0) + 1
+            if seen_dates[date_label] == 1:
+                output_date_cols.append(date_label)
+            else:
+                output_date_cols.append(f"{date_label}_{seen_dates[date_label]}")
+
+        result_df = result_df.rename(
+            columns=dict(zip(date_internal_cols, output_date_cols))
+        )
 
         # 숫자 날짜 컬럼
         date_columns = result_df.columns[3:]
