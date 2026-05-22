@@ -63,7 +63,7 @@ def find_date_columns(df):
             if is_date_header_value(val):
                 date_cols.append(i)
 
-        if len(date_cols) >= 5:
+        if len(date_cols) >= 1:
             return row_idx, date_cols
 
     raise Exception("날짜 열을 찾을 수 없습니다.")
