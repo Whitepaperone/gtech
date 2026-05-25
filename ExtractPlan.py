@@ -246,17 +246,9 @@ def map_workcenter_and_team(process_name):
         return "완성조립", "완성조립공정 - 클라크"
     if "특수품" in p_raw:
         return "완성조립", "완성조립공정 - 특수품"
-    if "액세서리" in p_raw or "HEATSCREEN" in p:
-        return "출하-액세서리", "출하-액세서리"
+    if "액세" in p_raw or "HEATSCREEN" in p:
+        return "출하-액세사리", "출하-액세사리"
     return None, None
-
-
-def canonical_workshop_name(name: str) -> str:
-    return (
-        normalize_process_token(name)
-        .replace("악세서리", "액세서리")
-        .replace("액세사리", "액세서리")
-    )
 
 
 def map_process_from_workshop(name: str) -> Optional[str]:
@@ -272,7 +264,7 @@ def pick_plan_part_no(workshop_name: str, row_values: Dict[str, str]) -> str:
         return row_values.get("tank_part_no", "")
     if w == "완성조립":
         return row_values.get("finish_part_no", "")
-    if "액세서리" in w:
+    if "액세" in w:
         return row_values.get("accessory_part_no", "") or row_values.get("finish_part_no", "")
 
     return (
@@ -289,7 +281,7 @@ def make_compare_key(process: str, workshop: str, team: str, part_no: str, day) 
     part_no = normalize_part_no(part_no)
     day = pd.to_datetime(day, errors="coerce").normalize()
 
-    if process == "완성" and workshop == "출하-액세서리":
+    if process == "완성" and "액세" in workshop:
         return f"{process}|{part_no}|{day}"
 
     return f"{process}|{workshop}|{team}|{part_no}|{day}"
@@ -364,17 +356,42 @@ def filter_work_order_period(df: pd.DataFrame, start_date=None, end_date=None) -
     return out.copy()
 
 
-def extract_work_order_file(plan_file: str) -> pd.DataFrame:
+def extract_work_order_file(plan_file: str, progress=None) -> pd.DataFrame:
+    if progress:
+        progress(8, "생산계획 통합 문서를 여는 중...")
+
     wb = load_workbook(plan_file, data_only=True)
     frames = []
+    sheet_items = [
+        (sheet_name, config)
+        for sheet_name, config in MES_SHEET_CONFIG.items()
+        if sheet_name in wb.sheetnames
+    ]
+    total = max(len(sheet_items), 1)
 
-    for sheet_name, config in MES_SHEET_CONFIG.items():
-        if sheet_name not in wb.sheetnames:
-            continue
+    for i, (sheet_name, config) in enumerate(sheet_items, start=1):
+        if progress:
+            start = 10 + int((i - 1) / total * 65)
+            progress(start, f"{sheet_name} 시트 추출 중...")
 
-        df_sheet = extract_plan_sheet(wb[sheet_name], config, check_red_font=True)
+        def sheet_progress(percent, text=None, i=i, sheet_name=sheet_name):
+            if progress:
+                base = 10 + ((i - 1) / total * 65)
+                span = 65 / total
+                progress(base + (percent / 100 * span), text or f"{sheet_name} 시트 추출 중...")
+
+        df_sheet = extract_plan_sheet(
+            wb[sheet_name],
+            config,
+            check_red_font=True,
+            progress=sheet_progress,
+        )
         if not df_sheet.empty:
             frames.append(df_sheet)
+
+        if progress:
+            done = 10 + int(i / total * 65)
+            progress(done, f"{sheet_name} 시트 추출 완료")
 
     if not frames:
         return pd.DataFrame()
@@ -501,7 +518,8 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
             if "용접C/M" in first_col_text or "코어C/M" in first_col_text or "선발주-용접C/M" in first_col_text:
                 continue
 
-        if "액세서리&HEATSCREEN" in normalize_process_token(row_text):
+        row_text_norm = normalize_process_token(row_text)
+        if "액세" in row_text_norm and "HEATSCREEN" in row_text_norm:
             accessory_mode = True
             continue
 
@@ -512,7 +530,7 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
 
         process_name_raw = ""
         if accessory_mode and ws.title == "완성공정(실적)":
-            process_name_raw = "액세서리 & HEAT SCREEN"
+            process_name_raw = "액세사리 & HEAT SCREEN"
         elif process_print_col:
             process_name_raw = normalize_process_token(values[process_print_col - 1])
 
@@ -522,9 +540,9 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
 
             workshop_name, team_name = map_workcenter_and_team(process_name_raw)
 
-            if workshop_name and "액세서리" in workshop_name:
-                workshop_name = "출하-액세서리"
-                team_name = "출하-액세서리"
+            if workshop_name and "액세" in workshop_name:
+                workshop_name = "출하-액세사리"
+                team_name = "출하-액세사리"
 
             if not workshop_name:
                 if config.get("default_process") == "CORE":
@@ -567,7 +585,7 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
             if is_mes:
                 process = map_process_from_workshop(workshop_name)
                 workshop_raw = workshop_name or ""
-                workshop = canonical_workshop_name(workshop_name)
+                workshop = normalize_process_token(workshop_name)
                 team = team_name or ""
                 part_norm = normalize_part_no(part_no)
 
