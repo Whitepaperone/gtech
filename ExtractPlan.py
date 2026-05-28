@@ -427,22 +427,49 @@ def build_work_order_upload_df(plan_df: pd.DataFrame) -> pd.DataFrame:
     df[qty_col] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0)
     df = df[df[qty_col] != 0].copy()
 
+    def first_non_empty(series):
+        for value in series:
+            if pd.notna(value) and str(value).strip():
+                return value
+        return ""
+
     grouped = (
         df.groupby(
-            [workcenter_col, team_col, model_col, part_col, process_print_col, date_col],
+            [part_col, date_col],
             as_index=False,
             dropna=False,
-        )[qty_col]
-        .sum()
+        )
+        .agg(
+            **{
+                workcenter_col: (workcenter_col, first_non_empty),
+                team_col: (team_col, first_non_empty),
+                model_col: (model_col, first_non_empty),
+                process_print_col: (process_print_col, first_non_empty),
+                qty_col: (qty_col, "sum"),
+            }
+        )
     )
 
     wide = grouped.pivot_table(
-        index=[workcenter_col, team_col, model_col, part_col, process_print_col],
+        index=[part_col],
         columns=date_col,
         values=qty_col,
         aggfunc="sum",
         fill_value=0,
     ).reset_index()
+
+    metadata = (
+        grouped.groupby(part_col, as_index=False, dropna=False)
+        .agg(
+            **{
+                workcenter_col: (workcenter_col, first_non_empty),
+                team_col: (team_col, first_non_empty),
+                model_col: (model_col, first_non_empty),
+                process_print_col: (process_print_col, first_non_empty),
+            }
+        )
+    )
+    wide = metadata.merge(wide, on=part_col, how="left")
 
     date_columns = sorted([c for c in wide.columns if isinstance(c, pd.Timestamp)])
     wide = wide[[workcenter_col, team_col, model_col, part_col, process_print_col] + date_columns]
