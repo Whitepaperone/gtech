@@ -603,10 +603,9 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
             # =========================
             calculated_next_midal = midal_qty + plan_qty - plan_sheet_actual_qty
 
+            # 다음 날짜의 미달 0도 의미 있는 값으로 본다.
+            # 0을 건너뛰면 이전 미달/초과 실적 때문에 다음 계획이 부족해야 하는 상황을 놓칠 수 있다.
             future_midal_rows = g.loc[i + 1:].copy()
-            future_midal_rows = future_midal_rows[
-                future_midal_rows["미달수량"].apply(lambda x: safe_float(x) != 0)
-            ]
 
             if not future_midal_rows.empty:
                 next_midal = safe_float(future_midal_rows.iloc[0]["미달수량"])
@@ -625,6 +624,9 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
             # =========================
             if work_qty == plan_qty:
                 work_judge = "작업지시일치"
+
+            elif work_qty == 0 and plan_qty > 0 and mes_actual_qty == plan_qty:
+                work_judge = "작업지시일치_MES실적대체"
 
             elif work_qty == 0 and completed_qty >= plan_qty:
                 work_judge = "작업지시일치후소멸"
@@ -646,22 +648,25 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
 
             # =========================
             # 실적 판정
-            # MES 작업지시가 소멸된 케이스는 MES 실적 비교 제외
+            # 작업지시관리 실적량은 생산실적현황과 차이가 날 수 있으므로,
+            # 비교 계산은 계획표의 실적분을 기준으로 진행한다.
             # =========================
             if work_judge in ("작업지시일치후소멸", "작업지시일치후미달이월"):
                 actual_judge = "실적확인제외_MES소멸"
             else:
-                if abs(plan_sheet_actual_qty - mes_actual_for_compare) < 0.000001:
-                    actual_judge = "실적일치"
-                else:
-                    actual_judge = "실적불일치"
+                actual_judge = "실적확인제외_계획표실적기준"
 
             # =========================
             # 최종 판정
             # =========================
             if (
-                work_judge in ("작업지시일치", "작업지시일치후소멸", "작업지시일치후미달이월")
-                and actual_judge in ("실적일치", "실적확인제외_MES소멸")
+                work_judge in (
+                    "작업지시일치",
+                    "작업지시일치후소멸",
+                    "작업지시일치후미달이월",
+                    "작업지시일치_MES실적대체",
+                )
+                and actual_judge in ("실적일치", "실적확인제외_MES소멸", "실적확인제외_계획표실적기준")
                 and midal_judge in ("미달흐름일치", "미달흐름확인제외")
             ):
                 judge = "일치"
@@ -679,10 +684,12 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
                 "미달수량": current_midal,
                 "계획표실적수량": plan_sheet_actual_qty,
                 "MES실적수량": mes_actual_qty,
-                "전일마감기준실적수량": mes_actual_for_compare,
+                "전일마감기준실적수량": plan_sheet_actual_qty,
                 "계획대비실적수량": plan_actual_for_today,
                 "작업지시수량": work_qty,
                 "판정": judge,
+                "_미달원본수량": midal_qty,
+                "_선생산적용수량": used_prebuild,
             })
 
     result = pd.DataFrame(result_rows)
@@ -759,6 +766,13 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
             return 0
 
         day = pd.to_datetime(day, errors="coerce").normalize()
+        first_history_day = pd.to_datetime(history["날짜"], errors="coerce").min()
+
+        # 계획표 기간 안쪽의 MES-only 작업지시는 미래 미달로 인정하지 않는다.
+        # 미래 미달 인정은 계획표 시작 전 작업지시가 다음 기간 미달로 이어지는 경우만 허용한다.
+        if pd.notna(first_history_day) and day >= first_history_day:
+            return remaining_midal_until(gkey, day)
+
         past_history = history[history["날짜"] <= day]
         if (past_history["미달수량"].apply(lambda x: safe_float(x) > 0)).any():
             return remaining_midal_until(gkey, day)
@@ -790,6 +804,17 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
         judge_list = []
 
         mes_only = mes_only.sort_values(["공정", "작업장명", "작업반명", "품번", "날짜"]).copy()
+        result_work = result.copy()
+        if not result_work.empty:
+            result_work["_MES_ONLY허용차감그룹키"] = result_work.apply(
+                lambda x: make_fifo_group_key(
+                    x["공정"],
+                    x["작업장명"],
+                    x["작업반명"],
+                    x["품번"]
+                ),
+                axis=1
+            )
 
         for _, r in mes_only.iterrows():
             gkey = make_fifo_group_key(
@@ -800,9 +825,19 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
             )
 
             work_qty = safe_float(r["작업지시수량"])
+            if result_work.empty:
+                existing_work_qty = 0
+            else:
+                mes_only_day = pd.to_datetime(r["날짜"], errors="coerce").normalize()
+                existing_work_qty = result_work[
+                    result_work["_MES_ONLY허용차감그룹키"].eq(gkey)
+                    & (pd.to_datetime(result_work["날짜"], errors="coerce").dt.normalize() <= mes_only_day)
+                ]["작업지시수량"].apply(safe_float).sum()
+
             remain_midal = max(
                 0,
                 remaining_midal_for_mes_only(gkey, r["날짜"])
+                - existing_work_qty
                 - used_midal_by_group.get(gkey, 0)
             )
 
@@ -835,6 +870,146 @@ def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, toda
     # =========================
     # 최종 정리
     # =========================
+    if result.empty:
+        return pd.DataFrame(columns=FINAL_COMPARE_COLUMNS)
+
+    # =========================
+    # 총 실적이 총 계획을 초과했는데 작업지시가 남은 경우 오류 처리
+    # =========================
+    result["_초과검사그룹키"] = result.apply(
+        lambda x: make_fifo_group_key(
+            x["공정"],
+            x["작업장명"],
+            x["작업반명"],
+            x["품번"]
+        ),
+        axis=1
+    )
+
+    for _, idx in result.groupby("_초과검사그룹키", dropna=False).groups.items():
+        group = result.loc[idx]
+        total_plan_qty = group["계획수량"].sum()
+        total_actual_qty = group["계획표실적수량"].sum()
+
+        if total_plan_qty > 0 and total_actual_qty > total_plan_qty:
+            remain_work_mask = group["작업지시수량"] > 0
+            target_idx = group[remain_work_mask].index
+
+            for row_idx in target_idx:
+                current_judge = str(result.at[row_idx, "판정"] or "")
+                extra_judge = "총실적초과_작업지시잔존"
+
+                if current_judge == "일치":
+                    result.at[row_idx, "판정"] = extra_judge
+                elif extra_judge not in current_judge:
+                    result.at[row_idx, "판정"] = f"{extra_judge}/{current_judge}"
+
+    # =========================
+    # 이전 실적 초과분이 해당 날짜 계획 전체를 덮는데 작업지시가 남은 경우 오류 처리
+    # =========================
+    for _, idx in result.groupby("_초과검사그룹키", dropna=False).groups.items():
+        group = result.loc[idx].copy()
+        group["날짜"] = pd.to_datetime(group["날짜"], errors="coerce").dt.normalize()
+        group = group.sort_values("날짜")
+
+        cumulative_plan = 0
+        cumulative_actual = 0
+
+        for row_idx, row in group.iterrows():
+            plan_qty = safe_float(row["계획수량"])
+            work_qty = safe_float(row["작업지시수량"])
+            previous_surplus = max(0, cumulative_actual - cumulative_plan)
+
+            current_prebuild = max(0, -safe_float(row.get("_미달원본수량", 0)))
+
+            if (
+                plan_qty > 0
+                and work_qty > 0
+                and (
+                    previous_surplus >= plan_qty
+                    or current_prebuild >= plan_qty
+                )
+            ):
+                current_judge = str(result.at[row_idx, "판정"] or "")
+                extra_judge = "이전실적초과_작업지시잔존"
+
+                if current_judge == "일치":
+                    result.at[row_idx, "판정"] = extra_judge
+                elif extra_judge not in current_judge:
+                    result.at[row_idx, "판정"] = f"{extra_judge}/{current_judge}"
+
+            cumulative_plan += plan_qty
+            cumulative_actual += safe_float(row["계획표실적수량"])
+
+    # =========================
+    # 같은 날짜의 선생산과 FIFO 배분 실적보다 계획이 더 많으면 부족분만큼 작업지시가 있어야 함
+    # =========================
+    for _, idx in result.groupby(["_초과검사그룹키", "날짜"], dropna=False).groups.items():
+        group = result.loc[idx]
+        total_plan_qty = group["계획수량"].apply(safe_float).sum()
+        total_work_qty = group["작업지시수량"].apply(safe_float).sum()
+        total_allocated_actual_qty = group["계획대비실적수량"].apply(safe_float).sum()
+        total_prebuild_qty = group["_선생산적용수량"].apply(safe_float).sum()
+
+        required_work_qty = max(
+            0,
+            total_plan_qty - total_allocated_actual_qty - total_prebuild_qty
+        )
+
+        if required_work_qty <= 0 or total_work_qty >= required_work_qty:
+            continue
+
+        shortage = required_work_qty - total_work_qty
+        for row_idx in group.index:
+            if safe_float(result.at[row_idx, "계획수량"]) <= 0:
+                continue
+
+            current_judge = str(result.at[row_idx, "판정"] or "")
+            extra_judge = f"선생산차감후_작업지시부족({shortage:g})"
+
+            if current_judge == "일치":
+                result.at[row_idx, "판정"] = extra_judge
+            elif extra_judge not in current_judge:
+                result.at[row_idx, "판정"] = f"{extra_judge}/{current_judge}"
+
+    # =========================
+    # 계획표 실적이 해당 날짜 계획을 채웠는데 작업지시가 남은 경우 오류 처리
+    # =========================
+    for row_idx, row in result.iterrows():
+        plan_qty = safe_float(row["계획수량"])
+        work_qty = safe_float(row["작업지시수량"])
+        allocated_actual_qty = safe_float(row["계획대비실적수량"])
+        prebuild_qty = safe_float(row.get("_선생산적용수량", 0))
+
+        if plan_qty <= 0 or work_qty <= 0:
+            continue
+
+        if allocated_actual_qty + prebuild_qty < plan_qty:
+            continue
+
+        current_judge = str(result.at[row_idx, "판정"] or "")
+        extra_judge = "계획소진_작업지시잔존"
+
+        if current_judge == "일치":
+            result.at[row_idx, "판정"] = extra_judge
+        elif extra_judge not in current_judge:
+            result.at[row_idx, "판정"] = f"{extra_judge}/{current_judge}"
+
+    result = result.drop(columns=["_초과검사그룹키", "_미달원본수량", "_선생산적용수량"], errors="ignore")
+
+    qty_cols = [
+        "계획수량",
+        "미달수량",
+        "계획표실적수량",
+        "MES실적수량",
+        "전일마감기준실적수량",
+        "계획대비실적수량",
+        "작업지시수량",
+    ]
+    for c in qty_cols:
+        result[c] = pd.to_numeric(result[c], errors="coerce").fillna(0)
+    result = result[result[qty_cols].abs().sum(axis=1) != 0].copy()
+
     if result.empty:
         return pd.DataFrame(columns=FINAL_COMPARE_COLUMNS)
 
