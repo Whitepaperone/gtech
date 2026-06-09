@@ -541,9 +541,15 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
         first_col_raw = merged_map.get((r, 1), values[0])
         first_col_text = normalize_process_token(first_col_raw)
 
-        if is_mes and ws.title == "완성공정(실적)":
+        if not accessory_mode and first_col_text.startswith("제외"):
+            continue
+
+        if ws.title == "완성공정(실적)":
             if "용접C/M" in first_col_text or "코어C/M" in first_col_text or "선발주-용접C/M" in first_col_text:
                 continue
+
+        if ws.title == "TANK공정(실적)" and first_col_text.startswith("코어C/M"):
+            continue
 
         row_text_norm = normalize_process_token(row_text)
         if "액세" in row_text_norm and "HEATSCREEN" in row_text_norm:
