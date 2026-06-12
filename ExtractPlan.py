@@ -541,9 +541,6 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
         first_col_raw = merged_map.get((r, 1), values[0])
         first_col_text = normalize_process_token(first_col_raw)
 
-        if not accessory_mode and first_col_text.startswith("제외"):
-            continue
-
         if ws.title == "완성공정(실적)":
             if "용접C/M" in first_col_text or "코어C/M" in first_col_text or "선발주-용접C/M" in first_col_text:
                 continue
@@ -560,6 +557,9 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
             stop_prefix = "단품" if is_mes else "제외"
             if first_col_text.startswith(stop_prefix):
                 break
+
+        if "제외" in first_col_text:
+            continue
 
         process_name_raw = ""
         if accessory_mode and ws.title == "완성공정(실적)":
