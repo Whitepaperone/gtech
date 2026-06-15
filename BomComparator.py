@@ -139,75 +139,115 @@ def compare_items(
 ) -> list[ComparisonRow]:
     change_by_part = aggregate_change_items(change_items)
     pdm_by_part = aggregate_pdm_items(pdm_items)
-    all_paths = sorted(set(change_by_part) | set(pdm_by_part))
+    matched_change_keys: set[str] = set()
+    matched_pdm_keys: set[str] = set()
 
     rows: list[ComparisonRow] = []
-    for key in all_paths:
-        change = change_by_part.get(key)
-        pdm = pdm_by_part.get(key)
+    for key in sorted(set(change_by_part) & set(pdm_by_part)):
+        change = change_by_part[key]
+        pdm = pdm_by_part[key]
+        matched_change_keys.add(key)
+        matched_pdm_keys.add(key)
+        status = "OK" if number_equal(change.quantity, pdm.quantity) else "Quantity Mismatch"
+        note = "" if status == "OK" else "Quantity differs."
 
-        if change and pdm:
-            if number_equal(change.quantity, pdm.quantity):
-                rows.append(
-                    ComparisonRow(
-                        path=change.path,
-                        part_number=change.part_number,
-                        status="OK",
-                        change_level=change.levels,
-                        change_quantity=change.quantity,
-                        pdm_level=pdm.levels,
-                        pdm_quantity=pdm.quantity,
-                        note="",
-                    )
-                )
-            else:
-                rows.append(
-                    ComparisonRow(
-                        path=change.path,
-                        part_number=change.part_number,
-                        status="Quantity Mismatch",
-                        change_level=change.levels,
-                        change_quantity=change.quantity,
-                        pdm_level=pdm.levels,
-                        pdm_quantity=pdm.quantity,
-                        note="Quantity differs.",
-                    )
-                )
+        rows.append(
+            ComparisonRow(
+                path=change.path,
+                part_number=change.part_number,
+                status=status,
+                change_level=change.levels,
+                change_quantity=change.quantity,
+                pdm_level=pdm.levels,
+                pdm_quantity=pdm.quantity,
+                note=note,
+            )
+        )
+
+    unmatched_pdm_by_part: dict[str, list[str]] = {}
+    for key, pdm in pdm_by_part.items():
+        if key in matched_pdm_keys:
             continue
+        unmatched_pdm_by_part.setdefault(normalize_part_number(pdm.part_number), []).append(key)
 
-        if change:
+    for change_key in sorted(set(change_by_part) - matched_change_keys):
+        change = change_by_part[change_key]
+        pdm_candidates = unmatched_pdm_by_part.get(normalize_part_number(change.part_number), [])
+
+        if pdm_candidates:
+            pdm_key = pdm_candidates.pop(0)
+            pdm = pdm_by_part[pdm_key]
+            matched_change_keys.add(change_key)
+            matched_pdm_keys.add(pdm_key)
+            status = "Path Mismatch" if number_equal(change.quantity, pdm.quantity) else "Path/Quantity Mismatch"
             rows.append(
                 ComparisonRow(
-                    path=change.path,
+                    path=f"Change: {change.path}\nPDM: {pdm.path}",
                     part_number=change.part_number,
-                    status="Missing in PDM BOM",
+                    status=status,
                     change_level=change.levels,
                     change_quantity=change.quantity,
-                    pdm_level="",
-                    pdm_quantity=None,
-                    note="Latest part number from Change List is not in PDM BOM.",
+                    pdm_level=pdm.levels,
+                    pdm_quantity=pdm.quantity,
+                    note="Same part number exists in both files, but BOM path is different.",
                 )
             )
             continue
 
-        if pdm:
-            rows.append(
-                ComparisonRow(
-                    path=pdm.path,
-                    part_number=pdm.part_number,
-                    status="Missing in Change List",
-                    change_level="",
-                    change_quantity=None,
-                    pdm_level=pdm.levels,
-                    pdm_quantity=pdm.quantity,
-                    note="Part number exists only in PDM BOM.",
-                )
+        rows.append(
+            ComparisonRow(
+                path=change.path,
+                part_number=change.part_number,
+                status="Missing in PDM BOM",
+                change_level=change.levels,
+                change_quantity=change.quantity,
+                pdm_level="",
+                pdm_quantity=None,
+                note="Latest part number from Change List is not in PDM BOM.",
             )
+        )
+
+    for pdm_key in sorted(set(pdm_by_part) - matched_pdm_keys):
+        pdm = pdm_by_part[pdm_key]
+        rows.append(
+            ComparisonRow(
+                path=pdm.path,
+                part_number=pdm.part_number,
+                status="Missing in Change List",
+                change_level="",
+                change_quantity=None,
+                pdm_level=pdm.levels,
+                pdm_quantity=pdm.quantity,
+                note="Part number exists only in PDM BOM.",
+            )
+        )
 
     return rows
 
 
-def write_comparison_excel(rows: list[ComparisonRow], output_path: str | Path) -> None:
+def add_parsed_items_sheet(workbook, title: str, items) -> None:
+    ws = workbook.create_sheet(title)
+    ws.append(["Level", "BOM Path", "Part Number", "Quantity"])
+    for cell in ws[1]:
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center")
+
+    for item in items:
+        ws.append([item.level, item.path, item.part_number, item.quantity])
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    for index, width in enumerate([12, 64, 26, 18], start=1):
+        ws.column_dimensions[get_column_letter(index)].width = width
+
+
+def write_comparison_excel(
+    rows: list[ComparisonRow],
+    output_path: str | Path,
+    change_items: list[ChangeListItem] | None = None,
+    pdm_items: list[PdmBomItem] | None = None,
+) -> None:
     workbook = Workbook()
     ws = workbook.active
     ws.title = "BOM Compare"
@@ -243,6 +283,12 @@ def write_comparison_excel(rows: list[ComparisonRow], output_path: str | Path) -
             ws.cell(row=row_index, column=3).fill = MISMATCH_FILL
             ws.cell(row=row_index, column=5).fill = MISMATCH_FILL
             ws.cell(row=row_index, column=7).fill = MISMATCH_FILL
+        elif status in {"Path Mismatch", "Path/Quantity Mismatch"}:
+            ws.cell(row=row_index, column=1).fill = MISMATCH_FILL
+            ws.cell(row=row_index, column=3).fill = MISMATCH_FILL
+            if status == "Path/Quantity Mismatch":
+                ws.cell(row=row_index, column=5).fill = MISMATCH_FILL
+                ws.cell(row=row_index, column=7).fill = MISMATCH_FILL
         elif status == "Missing in PDM BOM":
             for column in range(1, len(HEADER_ROW) + 1):
                 ws.cell(row=row_index, column=column).fill = MISSING_FILL
@@ -265,6 +311,11 @@ def write_comparison_excel(rows: list[ComparisonRow], output_path: str | Path) -
     widths = [64, 26, 24, 20, 22, 18, 20, 58]
     for index, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(index)].width = width
+
+    if change_items is not None:
+        add_parsed_items_sheet(workbook, "Parsed Change List", change_items)
+    if pdm_items is not None:
+        add_parsed_items_sheet(workbook, "Parsed PDM BOM", pdm_items)
 
     workbook.save(output_path)
 
@@ -369,7 +420,7 @@ def main() -> None:
         rows = compare_items(change_items, pdm_items)
 
         update_progress(85, "Writing result Excel file...")
-        write_comparison_excel(rows, output_file)
+        write_comparison_excel(rows, output_file, change_items, pdm_items)
 
         update_progress(100, "Complete.")
         progress_win.destroy()

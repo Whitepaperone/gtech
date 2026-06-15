@@ -34,9 +34,9 @@ class PartNumberCell:
 
 
 HEADER_ALIASES = {
-    "level": {"level", "lvl", "레벨", "Level"},
-    "part_number": {"partnumber", "partno", "partnum", "품번", "품목번호", "Part Number"},
-    "quantity": {"quantity", "qunatity", "qty", "수량", "Quantity"},
+    "level": {"level", "lvl", "레벨"},
+    "part_number": {"partnumber", "partno", "partnum", "품번", "품목번호"},
+    "quantity": {"quantity", "qunatity", "qty", "qty.", "수량"},
 }
 
 CHANGE_ACTIONS = {"C", "CHANGE"}
@@ -46,7 +46,7 @@ DELETE_ACTIONS = {"D", "DELETE", "DEL"}
 
 def normalize_header(value: Any) -> str:
     text = "" if value is None else str(value)
-    return re.sub(r"[\s_\-./()]+", "", text).lower()
+    return re.sub(r"[\s_\-./()'`’]+", "", text).lower()
 
 
 def header_matches(header_name: str, normalized: str) -> bool:
@@ -62,6 +62,15 @@ def header_matches(header_name: str, normalized: str) -> bool:
 def normalize_action(value: Any) -> str:
     text = "" if value is None else str(value).strip()
     return text.upper()
+
+
+def row_action(ws, row_index: int, columns: dict[str, list[int]]) -> str:
+    first_part_column = min(columns["part_number"]) if columns["part_number"] else ws.max_column + 1
+    for column in range(1, first_part_column):
+        action = normalize_action(ws.cell(row=row_index, column=column).value)
+        if action in CHANGE_ACTIONS | ADD_ACTIONS | DELETE_ACTIONS:
+            return action
+    return ""
 
 
 def cell_text(value: Any) -> str:
@@ -83,6 +92,36 @@ def quantity_value(value: Any) -> float:
         return float(text)
     except ValueError:
         return 0
+
+
+def has_cell_value(value: Any) -> bool:
+    return value is not None and str(value).strip() != ""
+
+
+def get_merged_cell_value(ws, row: int, column: int) -> Any:
+    cell = ws.cell(row=row, column=column)
+    for merged_range in ws.merged_cells.ranges:
+        if cell.coordinate in merged_range:
+            return ws.cell(merged_range.min_row, merged_range.min_col).value
+    return cell.value
+
+
+def strip_revision_and_description(value: Any) -> str:
+    text = cell_text(value)
+    if not text:
+        return ""
+    text = re.split(r"\s*\(", text, maxsplit=1)[0].strip()
+    text = text.rsplit("/", 1)[0].strip()
+    return text
+
+
+def find_root_part_number_above_header(ws, header_row: int, columns: dict[str, list[int]]) -> str:
+    for part_column in reversed(columns["part_number"]):
+        for row_index in range(header_row - 1, 0, -1):
+            value = strip_revision_and_description(get_merged_cell_value(ws, row_index, part_column))
+            if value:
+                return value
+    return ""
 
 
 def collect_header_columns(ws, header_row: int) -> dict[str, list[int]]:
@@ -173,10 +212,38 @@ def extract_part_chain(ws, row_index: int, columns: dict[str, list[int]]) -> lis
     return chain
 
 
+def extract_change_part_chain(ws, row_index: int, columns: dict[str, list[int]]) -> list[PartNumberCell]:
+    chain: list[PartNumberCell] = []
+    part_columns = columns["part_number"]
+    previous_part_number = ""
+
+    for index, part_column in enumerate(part_columns):
+        value = cell_text(ws.cell(row=row_index, column=part_column).value)
+        next_part_column = part_columns[index + 1] if index + 1 < len(part_columns) else None
+        qty_col = quantity_column_for_part(
+            part_column,
+            next_part_column,
+            columns["quantity"],
+            index,
+        )
+        raw_qty = ws.cell(row=row_index, column=qty_col).value if qty_col else None
+        qty = quantity_value(raw_qty) if qty_col else 0
+
+        if value:
+            previous_part_number = value
+            chain.append(PartNumberCell(column=part_column, value=value, quantity=qty))
+            continue
+
+        if previous_part_number and qty_col and has_cell_value(raw_qty):
+            chain.append(PartNumberCell(column=part_column, value=previous_part_number, quantity=qty))
+
+    return chain
+
+
 def row_level(ws, row_index: int, columns: dict[str, list[int]]) -> str:
     for level_column in columns["level"]:
         value = cell_text(ws.cell(row=row_index, column=level_column).value)
-        if value:
+        if value and normalize_action(value) not in CHANGE_ACTIONS | ADD_ACTIONS | DELETE_ACTIONS:
             return value
     return ""
 
@@ -233,10 +300,17 @@ def parse_change_list(xlsx_path: str | Path, sheet_name: str | None = None) -> l
     active_items: dict[str, ChangeListItem] = {}
     alias_by_part_number: dict[str, str] = {}
     parent_parts_by_level: dict[int, str] = {}
+    synthetic_root_part_number = find_root_part_number_above_header(ws, header_row, columns)
+    has_seen_level_zero = False
+    has_added_synthetic_root = False
 
     for row_index in range(header_row + 1, ws.max_row + 1):
-        action = normalize_action(ws.cell(row=row_index, column=1).value)
-        chain = extract_part_chain(ws, row_index, columns)
+        action = row_action(ws, row_index, columns)
+        chain = (
+            extract_change_part_chain(ws, row_index, columns)
+            if action in CHANGE_ACTIONS
+            else extract_part_chain(ws, row_index, columns)
+        )
         if not chain:
             continue
 
@@ -245,7 +319,30 @@ def parse_change_list(xlsx_path: str | Path, sheet_name: str | None = None) -> l
         level = row_level(ws, row_index, columns)
         numeric_level = level_number(level)
         if numeric_level is None:
+            if action in DELETE_ACTIONS:
+                delete_part_numbers = {normalize_part_key(part.value) for part in chain}
+                for key, item in list(active_items.items()):
+                    if normalize_part_key(item.part_number) in delete_part_numbers:
+                        active_items.pop(key, None)
             continue
+
+        if numeric_level == 0:
+            has_seen_level_zero = True
+
+        if (
+            numeric_level > 0
+            and not has_seen_level_zero
+            and not has_added_synthetic_root
+            and synthetic_root_part_number
+        ):
+            active_items[scoped_alias_key("", synthetic_root_part_number)] = ChangeListItem(
+                level="0",
+                path=synthetic_root_part_number,
+                part_number=synthetic_root_part_number,
+                quantity=1,
+            )
+            parent_parts_by_level[0] = synthetic_root_part_number
+            has_added_synthetic_root = True
 
         prune_stack(parent_parts_by_level, numeric_level)
         parent_path = " > ".join(
