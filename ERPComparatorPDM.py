@@ -10,19 +10,21 @@ from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 
 from CommonUtils import create_progress_window
-from ERPComparator import (
+from ERPComparatorChangeList import (
     HEADER_FILL,
     MISSING_ERP_FILL,
     MISSING_QTY_FILL,
     OUTPUT_HEADERS,
     OUTPUT_SHEET_NAME,
     BomUploadRow,
+    append_raw_material_placeholder,
+    needs_raw_material_placeholder,
     split_path,
     unit_for_part,
 )
 from ERPPartsDb import (
     DEFAULT_ERP_DB,
-    load_erp_part_numbers_from_db,
+    load_erp_parts_from_db,
     normalize_part_lookup,
     refresh_erp_db_from_excel,
 )
@@ -38,7 +40,7 @@ def numeric_level(item: PdmBomItem) -> int | None:
 
 def build_pdm_bom_upload_rows(
     items: list[PdmBomItem],
-    erp_part_numbers: set[str] | None = None,
+    erp_parts: dict[str, dict[str, str]] | None = None,
 ) -> list[BomUploadRow]:
     rows: list[BomUploadRow] = []
 
@@ -56,17 +58,19 @@ def build_pdm_bom_upload_rows(
 
         quantity = float(item.quantity or 0)
         child_lookup = normalize_part_lookup(child_part)
-        rows.append(
-            BomUploadRow(
-                parent_part=path_parts[-2],
-                child_part=child_part,
-                parent_qty=1,
-                quantity=quantity,
-                unit=unit_for_part(child_part),
-                needs_quantity=quantity == 0,
-                is_registered_in_erp=erp_part_numbers is None or child_lookup in erp_part_numbers,
-            )
+        row = BomUploadRow(
+            parent_part=path_parts[-2],
+            child_part=child_part,
+            parent_qty=1,
+            quantity=quantity,
+            unit=unit_for_part(child_part),
+            needs_quantity=quantity == 0,
+            is_registered_in_erp=erp_parts is None or child_lookup in erp_parts,
         )
+        rows.append(row)
+
+        if needs_raw_material_placeholder(child_part, erp_parts):
+            append_raw_material_placeholder(rows, child_part)
 
     return rows
 
@@ -93,6 +97,11 @@ def write_bom_upload_file(output_file: str | Path, rows: list[BomUploadRow]) -> 
             qty_cell = ws.cell(row=row_index, column=4)
             qty_cell.fill = MISSING_QTY_FILL
             qty_cell.font = Font(name="맑은 고딕", size=10, bold=True, color="FFFFFF")
+
+        if row.is_raw_material_placeholder:
+            child_cell = ws.cell(row=row_index, column=2)
+            child_cell.fill = MISSING_QTY_FILL
+            child_cell.font = Font(name="맑은 고딕", size=10, bold=True, color="FFFFFF")
 
         if not row.is_registered_in_erp:
             child_cell = ws.cell(row=row_index, column=2)
@@ -137,11 +146,11 @@ def run(
 
     if progress:
         progress(50, "ERP DB 확인 중...")
-    erp_part_numbers = load_erp_part_numbers_from_db(db_path)
+    erp_parts = load_erp_parts_from_db(db_path)
 
     if progress:
         progress(65, "BOM 업로드 시트 데이터 생성 중...")
-    rows = build_pdm_bom_upload_rows(items, erp_part_numbers)
+    rows = build_pdm_bom_upload_rows(items, erp_parts)
     missing_count = sum(1 for row in rows if row.needs_quantity)
     missing_erp_count = sum(1 for row in rows if not row.is_registered_in_erp)
 

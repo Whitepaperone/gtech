@@ -32,7 +32,7 @@ from ChangeListParser import (
 from CommonUtils import create_progress_window
 from ERPPartsDb import (
     DEFAULT_ERP_DB,
-    load_erp_part_numbers_from_db,
+    load_erp_parts_from_db,
     normalize_part_lookup,
     refresh_erp_db_from_excel,
 )
@@ -43,6 +43,10 @@ OUTPUT_HEADERS = ["모품목", "자품목", "PARENTQTY", "수량", "단위"]
 MISSING_QTY_FILL = PatternFill(fill_type="solid", fgColor="FF0000")
 MISSING_ERP_FILL = PatternFill(fill_type="solid", fgColor="FFC7CE")
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="D9EAF7")
+RAW_MATERIAL_SUPPLIERS = {
+    "주식회사 차세대산업",
+    "㈜한국라디에터",
+}
 
 
 @dataclass
@@ -54,6 +58,7 @@ class BomUploadRow:
     unit: str
     needs_quantity: bool
     is_registered_in_erp: bool = True
+    is_raw_material_placeholder: bool = False
 
 
 def split_path(path: str) -> list[str]:
@@ -69,6 +74,38 @@ def numeric_level(item: ChangeListItem) -> int | None:
 
 def unit_for_part(part_number: str) -> str:
     return "kg" if str(part_number or "").strip().upper().startswith("J") else "EA"
+
+
+def normalize_supplier_name(value: str) -> str:
+    return str(value or "").strip().replace(" ", "")
+
+
+def needs_raw_material_placeholder(child_part: str, erp_parts: dict[str, dict[str, str]] | None) -> bool:
+    if not erp_parts:
+        return False
+
+    part_info = erp_parts.get(normalize_part_lookup(child_part))
+    if not part_info:
+        return False
+
+    category = str(part_info.get("category", "")).strip()
+    supplier = normalize_supplier_name(part_info.get("supplier", ""))
+    return category == "부품" and supplier in RAW_MATERIAL_SUPPLIERS
+
+
+def append_raw_material_placeholder(rows: list[BomUploadRow], parent_part: str) -> None:
+    rows.append(
+        BomUploadRow(
+            parent_part=parent_part,
+            child_part="",
+            parent_qty=1,
+            quantity="",
+            unit="kg",
+            needs_quantity=True,
+            is_registered_in_erp=True,
+            is_raw_material_placeholder=True,
+        )
+    )
 
 
 def normalized_path_parts(path: str) -> tuple[str, ...]:
@@ -136,7 +173,7 @@ def collect_changed_paths(xlsx_path: str | Path, sheet_name: str | None = None) 
 def build_bom_upload_rows(
     items: list[ChangeListItem],
     changed_paths: set[tuple[str, ...]],
-    erp_part_numbers: set[str] | None = None,
+    erp_parts: dict[str, dict[str, str]] | None = None,
 ) -> list[BomUploadRow]:
     rows: list[BomUploadRow] = []
 
@@ -158,17 +195,19 @@ def build_bom_upload_rows(
 
         quantity = float(item.quantity or 0)
         child_lookup = normalize_part_lookup(child_part)
-        rows.append(
-            BomUploadRow(
-                parent_part=path_parts[-2],
-                child_part=child_part,
-                parent_qty=1,
-                quantity=quantity,
-                unit=unit_for_part(child_part),
-                needs_quantity=quantity == 0,
-                is_registered_in_erp=erp_part_numbers is None or child_lookup in erp_part_numbers,
-            )
+        row = BomUploadRow(
+            parent_part=path_parts[-2],
+            child_part=child_part,
+            parent_qty=1,
+            quantity=quantity,
+            unit=unit_for_part(child_part),
+            needs_quantity=quantity == 0,
+            is_registered_in_erp=erp_parts is None or child_lookup in erp_parts,
         )
+        rows.append(row)
+
+        if needs_raw_material_placeholder(child_part, erp_parts):
+            append_raw_material_placeholder(rows, child_part)
 
     return rows
 
@@ -207,6 +246,11 @@ def write_bom_upload_sheet(input_file: str | Path, output_file: str | Path, rows
             qty_cell = ws.cell(row=row_index, column=4)
             qty_cell.fill = MISSING_QTY_FILL
             qty_cell.font = Font(name="맑은 고딕", size=10, bold=True, color="FFFFFF")
+
+        if row.is_raw_material_placeholder:
+            child_cell = ws.cell(row=row_index, column=2)
+            child_cell.fill = MISSING_QTY_FILL
+            child_cell.font = Font(name="맑은 고딕", size=10, bold=True, color="FFFFFF")
 
         if not row.is_registered_in_erp:
             child_cell = ws.cell(row=row_index, column=2)
@@ -252,11 +296,11 @@ def run(
 
     if progress:
         progress(50, "ERP DB 확인 중...")
-    erp_part_numbers = load_erp_part_numbers_from_db(db_path)
+    erp_parts = load_erp_parts_from_db(db_path)
 
     if progress:
         progress(60, "BOM 업로드 시트 데이터 생성 중...")
-    rows = build_bom_upload_rows(items, changed_paths, erp_part_numbers)
+    rows = build_bom_upload_rows(items, changed_paths, erp_parts)
     missing_count = sum(1 for row in rows if row.needs_quantity)
     missing_erp_count = sum(1 for row in rows if not row.is_registered_in_erp)
 

@@ -252,3 +252,42 @@ def load_erp_part_numbers_from_db(db_path: str | Path = DEFAULT_ERP_DB) -> set[s
     if not part_numbers:
         raise ValueError("ERP DB에 저장된 품번이 없습니다. ERP 품목상품 파일로 DB를 갱신해주세요.")
     return part_numbers
+
+
+def load_erp_parts_from_db(db_path: str | Path = DEFAULT_ERP_DB) -> dict[str, dict[str, str]]:
+    if not Path(db_path).exists():
+        raise FileNotFoundError(f"ERP DB가 없습니다: {db_path}")
+
+    create_erp_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                part_key,
+                part_number,
+                category,
+                name,
+                spec,
+                supplier,
+                unit,
+                min_purchase_qty
+            FROM erp_parts
+            """
+        ).fetchall()
+
+    parts = {
+        row[0]: {
+            "part_number": row[1] or "",
+            "category": row[2] or "",
+            "name": row[3] or "",
+            "spec": row[4] or "",
+            "supplier": row[5] or "",
+            "unit": row[6] or "",
+            "min_purchase_qty": row[7] or "",
+        }
+        for row in rows
+        if row[0]
+    }
+    if not parts:
+        raise ValueError("ERP DB에 저장된 품번이 없습니다. ERP 품목상품 파일로 DB를 갱신해주세요.")
+    return parts
