@@ -4,6 +4,4 @@ excel_watch/
 단일파일 버전/
 *.xlsx
 *.spec
-.db
-.json
-AppConstants.py
+*.db
