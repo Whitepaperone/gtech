@@ -8,6 +8,13 @@
   "data_start_row": 35,
   "date_scan_min_col": 1,
   "date_header_gap_break": 3,
+  "order_zone_fixed_columns": {
+    "sales_col": 29,
+    "stock_col": 30,
+    "current_month_order_col": 36,
+    "next_month_order_col": 37,
+    "second_next_month_order_col": 38
+  },
   "mes_sheet_config": {
     "완성공정(실적)": {"default_process": "완성"},
     "TANK공정(실적)": {"default_process": "TANK"},
