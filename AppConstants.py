@@ -13,6 +13,13 @@ DEFAULT_CONFIG = {
     "data_start_row": 35,
     "date_scan_min_col": 1,
     "date_header_gap_break": 3,
+    "order_zone_fixed_columns": {
+        "sales_col": 29,
+        "stock_col": 30,
+        "current_month_order_col": 36,
+        "next_month_order_col": 37,
+        "second_next_month_order_col": 38,
+    },
     "mes_sheet_config": {
         "완성공정(실적)": {"default_process": "완성"},
         "TANK공정(실적)": {"default_process": "TANK"},
@@ -66,6 +73,7 @@ HEADER_KIND_ROW = CONFIG["header_kind_row"]
 DATA_START_ROW = CONFIG["data_start_row"]
 DATE_SCAN_MIN_COL = CONFIG["date_scan_min_col"]
 DATE_HEADER_GAP_BREAK = CONFIG["date_header_gap_break"]
+ORDER_ZONE_FIXED_COLUMNS = CONFIG["order_zone_fixed_columns"]
 
 MES_SHEET_CONFIG = CONFIG["mes_sheet_config"]
 WORKSHOP_TO_PROCESS = CONFIG["workshop_to_process"]
