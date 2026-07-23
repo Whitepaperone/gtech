@@ -18,9 +18,11 @@ from ERPComparatorChangeList import (
     OUTPUT_SHEET_NAME,
     BomUploadRow,
     append_raw_material_placeholder,
+    needs_inhouse_raw_material_placeholder,
     needs_raw_material_placeholder,
     split_path,
     unit_for_part,
+    select_only_sheet,
 )
 from ERPPartsDb import (
     DEFAULT_ERP_DB,
@@ -70,6 +72,8 @@ def build_pdm_bom_upload_rows(
         rows.append(row)
 
         if needs_raw_material_placeholder(child_part, erp_parts):
+            append_raw_material_placeholder(rows, row.parent_part)
+        if needs_inhouse_raw_material_placeholder(child_part, erp_parts):
             append_raw_material_placeholder(rows, child_part)
 
     return rows
@@ -112,7 +116,7 @@ def write_bom_upload_file(output_file: str | Path, rows: list[BomUploadRow]) -> 
         ws.column_dimensions[get_column_letter(col_index)].width = width
 
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
+    select_only_sheet(workbook, ws)
     workbook.save(output_file)
     workbook.close()
     return OUTPUT_SHEET_NAME

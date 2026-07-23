@@ -45,8 +45,11 @@ MISSING_ERP_FILL = PatternFill(fill_type="solid", fgColor="FFC7CE")
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="D9EAF7")
 RAW_MATERIAL_SUPPLIERS = {
     "주식회사 차세대산업",
+    "(주)한국라디에터",
     "㈜한국라디에터",
 }
+INHOUSE_RAW_MATERIAL_NAMES = {"PLATE", "TUBE"}
+INHOUSE_RAW_MATERIAL_PREFIXES = ("FIN",)
 
 
 @dataclass
@@ -77,7 +80,13 @@ def unit_for_part(part_number: str) -> str:
 
 
 def normalize_supplier_name(value: str) -> str:
-    return str(value or "").strip().replace(" ", "")
+    return (
+        str(value or "")
+        .strip()
+        .replace(" ", "")
+        .replace("　", "")
+        .replace("㈜", "(주)")
+    )
 
 
 def needs_raw_material_placeholder(child_part: str, erp_parts: dict[str, dict[str, str]] | None) -> bool:
@@ -90,7 +99,24 @@ def needs_raw_material_placeholder(child_part: str, erp_parts: dict[str, dict[st
 
     category = str(part_info.get("category", "")).strip()
     supplier = normalize_supplier_name(part_info.get("supplier", ""))
-    return category == "부품" and supplier in RAW_MATERIAL_SUPPLIERS
+    target_suppliers = {normalize_supplier_name(value) for value in RAW_MATERIAL_SUPPLIERS}
+    return category == "부품" and supplier in target_suppliers
+
+
+def normalize_item_name(value: str) -> str:
+    return str(value or "").strip().upper().replace(" ", "")
+
+
+def needs_inhouse_raw_material_placeholder(child_part: str, erp_parts: dict[str, dict[str, str]] | None) -> bool:
+    if not erp_parts:
+        return False
+
+    part_info = erp_parts.get(normalize_part_lookup(child_part))
+    if not part_info:
+        return False
+
+    item_name = normalize_item_name(part_info.get("name", ""))
+    return item_name in INHOUSE_RAW_MATERIAL_NAMES or item_name.startswith(INHOUSE_RAW_MATERIAL_PREFIXES)
 
 
 def append_raw_material_placeholder(rows: list[BomUploadRow], parent_part: str) -> None:
@@ -190,7 +216,7 @@ def build_bom_upload_rows(
             continue
 
         normalized_path = normalized_path_parts(item.path)
-        if not should_keep_changed_row(normalized_path, changed_paths):
+        if level != 1 and not should_keep_changed_row(normalized_path, changed_paths):
             continue
 
         quantity = float(item.quantity or 0)
@@ -207,6 +233,8 @@ def build_bom_upload_rows(
         rows.append(row)
 
         if needs_raw_material_placeholder(child_part, erp_parts):
+            append_raw_material_placeholder(rows, row.parent_part)
+        if needs_inhouse_raw_material_placeholder(child_part, erp_parts):
             append_raw_material_placeholder(rows, child_part)
 
     return rows
@@ -220,6 +248,13 @@ def unique_sheet_name(workbook, base_name: str) -> str:
     while f"{base_name}_{index}" in workbook.sheetnames:
         index += 1
     return f"{base_name}_{index}"
+
+
+def select_only_sheet(workbook, ws) -> None:
+    for sheet in workbook.worksheets:
+        sheet.sheet_view.tabSelected = False
+    ws.sheet_view.tabSelected = True
+    workbook.active = workbook.worksheets.index(ws)
 
 
 def write_bom_upload_sheet(input_file: str | Path, output_file: str | Path, rows: list[BomUploadRow]) -> str:
@@ -261,7 +296,7 @@ def write_bom_upload_sheet(input_file: str | Path, output_file: str | Path, rows
         ws.column_dimensions[get_column_letter(col_index)].width = width
 
     ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
+    select_only_sheet(workbook, ws)
     workbook.save(output_file)
     workbook.close()
     return sheet_name
