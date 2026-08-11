@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import sqlite3
+import sys
 from typing import Any
 
 from openpyxl import load_workbook
@@ -17,7 +18,12 @@ except ImportError:  # pragma: no cover - fallback for PCs without Excel COM sup
     win32com = None
 
 
-DEFAULT_ERP_DB = Path(__file__).with_name("erp_parts.db")
+if getattr(sys, "frozen", False):
+    APP_DIR = Path(sys.executable).resolve().parent
+else:
+    APP_DIR = Path(__file__).resolve().parent
+
+DEFAULT_ERP_DB = APP_DIR / "erp_parts.db"
 ERP_DATA_START_ROW = 2
 ERP_FIXED_COLUMNS = {
     "part_number": 2,  # B
