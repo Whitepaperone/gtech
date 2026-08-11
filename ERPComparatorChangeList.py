@@ -314,6 +314,7 @@ def run(
     erp_file: str | Path | None = None,
     db_path: str | Path = DEFAULT_ERP_DB,
     refresh_erp: bool = False,
+    skip_erp_db: bool = False,
     progress=None,
 ) -> tuple[int, int, int, str]:
     if progress:
@@ -331,7 +332,7 @@ def run(
 
     if progress:
         progress(50, "ERP DB 확인 중...")
-    erp_parts = load_erp_parts_from_db(db_path)
+    erp_parts = {} if skip_erp_db else load_erp_parts_from_db(db_path)
 
     if progress:
         progress(60, "BOM 업로드 시트 데이터 생성 중...")
@@ -355,6 +356,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--erp", help="ERP DB 갱신에 사용할 품목상품 엑셀 파일 경로")
     parser.add_argument("--erp-db", default=str(DEFAULT_ERP_DB), help="ERP 품목 DB 경로")
     parser.add_argument("--refresh-erp", action="store_true", help="ERP 엑셀을 다시 읽어서 DB를 갱신합니다.")
+    parser.add_argument("--skip-erp-db", action="store_true", help="ERP DB를 사용하지 않고 미등록 품번으로 처리합니다.")
     parser.add_argument("--output", "-o", help="결과 엑셀 파일 경로")
     return parser
 
@@ -373,6 +375,7 @@ def main() -> None:
             args.erp,
             args.erp_db,
             args.refresh_erp or bool(args.erp),
+            args.skip_erp_db,
         )
         print(f"Saved: {output_file}")
         print(f"Sheet: {result_sheet_name}")
@@ -392,20 +395,26 @@ def main() -> None:
 
         erp_file = None
         refresh_erp = False
+        skip_erp_db = False
         if not DEFAULT_ERP_DB.exists():
-            messagebox.showinfo(
+            update_erp = messagebox.askyesno(
                 "ERP DB 생성",
-                "ERP 품목 DB가 없어 처음 한 번 ERP 품목상품 엑셀 파일을 읽어옵니다.",
+                "ERP 품목 DB가 없습니다. ERP 품목상품 엑셀 파일로 DB를 갱신할까요?\n\n"
+                "아니오를 선택하면 DB 갱신 없이 계속 진행합니다.",
                 parent=root,
             )
-            erp_file = filedialog.askopenfilename(
-                parent=root,
-                title="ERP 품목상품 엑셀 파일 선택",
-                filetypes=[("Excel files", "*.xlsx *.xlsm *.xls")],
-            )
-            if not erp_file:
-                return
-            refresh_erp = True
+            if update_erp:
+                erp_file = filedialog.askopenfilename(
+                    parent=root,
+                    title="ERP 품목상품 엑셀 파일 선택",
+                    filetypes=[("Excel files", "*.xlsx *.xlsm *.xls")],
+                )
+                if erp_file:
+                    refresh_erp = True
+                else:
+                    skip_erp_db = True
+            else:
+                skip_erp_db = True
 
         output_file = filedialog.asksaveasfilename(
             parent=root,
@@ -425,6 +434,7 @@ def main() -> None:
                 output_file,
                 erp_file=erp_file,
                 refresh_erp=refresh_erp,
+                skip_erp_db=skip_erp_db,
                 progress=update_progress,
             )
         finally:
