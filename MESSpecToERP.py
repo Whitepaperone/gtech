@@ -635,7 +635,6 @@ def run_gui() -> None:
         )
     except Exception as exc:
         messagebox.showerror("Error", str(exc), parent=root)
-        raise
     finally:
         root.destroy()
 

@@ -340,7 +340,6 @@ def main():
     except Exception as e:
         progress_win.destroy()
         messagebox.showerror("오류", f"처리 중 오류가 발생했습니다.\n\n{e}")
-        raise
 
 
 if __name__ == "__main__":

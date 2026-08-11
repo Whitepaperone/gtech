@@ -1,9 +1,13 @@
 from openpyxl import load_workbook
 import pandas as pd
-from tkinter import Tk, filedialog, messagebox
+from tkinter import Tk, messagebox
 from datetime import datetime
 
-from CommonUtils import apply_quantities_by_part_left_to_right, load_actual_quantities_by_part
+from CommonUtils import (
+    apply_quantities_by_part_left_to_right,
+    load_actual_quantities_by_part,
+    select_excel_file,
+)
 
 OUTPUT_FILE = "./output.xlsx"
 
@@ -119,14 +123,14 @@ def adjust_row(values):
 
     return result
 def main():
-    Tk().withdraw()
+    root = Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
 
-    file_path = filedialog.askopenfilename(
-        title="엑셀 선택",
-        filetypes=[("Excel files", "*.xlsx")]
-    )
+    file_path = select_excel_file("엑셀 선택", parent=root)
 
     if not file_path:
+        root.destroy()
         return
 
     try:
@@ -143,9 +147,10 @@ def main():
 
         today_grouped = load_actual_quantities_by_part(OUTPUT_FILE)
 
-        product_col = start_col - 1
-        customer_code_col = start_col - 2
+        # 날짜 열 앞의 원본 배치: 모델명 → 고객사 품번 → 품번
         model_col = start_col - 3
+        customer_code_col = start_col - 2
+        product_col = start_col - 1
 
 
         date_row = df.iloc[date_row_idx, date_cols].tolist()
@@ -177,9 +182,9 @@ def main():
             row = [pd.to_numeric(x, errors='coerce') for x in row]
             row = [0 if pd.isna(x) else x for x in row]
 
-            adjusted = adjust_row(row)
-
-            processed_rows.append([model, customer_code, product] + adjusted)
+            # 같은 품번의 수량을 모두 합산한 뒤 재고 이월을 계산해야 한다.
+            # 여기서 먼저 계산하면 -8 행은 0이 되고 +6 행은 그대로 남는 문제가 생긴다.
+            processed_rows.append([model, customer_code, product] + row)
 
 
         # 저장
@@ -199,6 +204,16 @@ def main():
         # 🔥 품번 기준 그룹화 + 합계
         result_df["품번"] = result_df["품번"].astype(str).str.strip()
         result_df = result_df.groupby("품번", as_index=False).agg(agg_dict)
+        result_df = result_df[
+            ["품번", "모델", "고객사 품번"] + date_internal_cols
+        ]
+
+        # 같은 품번/날짜의 수량을 먼저 상계한 결과로 재고를 미래 계획에 차감한다.
+        # 예: 첫날 -8 + 6 = -2 → 첫날은 0, 재고 2만 다음 날로 이월
+        for idx in result_df.index:
+            grouped_values = result_df.loc[idx, date_internal_cols].tolist()
+            result_df.loc[idx, date_internal_cols] = adjust_row(grouped_values)
+
         result_df = apply_quantities_by_part_left_to_right(
             result_df,
             today_grouped,
@@ -261,6 +276,8 @@ def main():
 
     except Exception as e:
         messagebox.showerror("오류", str(e))
+    finally:
+        root.destroy()
 
 
 if __name__ == "__main__":
