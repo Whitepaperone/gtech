@@ -542,8 +542,10 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
         first_col_text = normalize_process_token(first_col_raw)
 
         if ws.title == "완성공정(실적)":
+            finish_part_no = row_values.get("finish_part_no", "") or ""
             if "용접C/M" in first_col_text or "코어C/M" in first_col_text or "선발주-용접C/M" in first_col_text:
-                continue
+                if "-반" not in finish_part_no:
+                    continue
 
         if ws.title == "TANK공정(실적)" and first_col_text.startswith("코어C/M"):
             continue
