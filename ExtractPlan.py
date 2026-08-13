@@ -4,6 +4,7 @@ from tkinter import filedialog, messagebox
 from tkcalendar import Calendar
 import pandas as pd
 from openpyxl import load_workbook
+import datetime
 
 from AppConstants import (
     DATA_START_ROW,
@@ -15,6 +16,12 @@ from AppConstants import (
     PLAN_OUTPUT_FILE,
     PLAN_SHEET_NAMES,
     WORKSHOP_TO_PROCESS,
+    EXTRACT_STOCK,
+    STOCK_COL,
+    CORE_TUBE_OUTPUT_FILE,
+    CORE_TUBE_HEADER_COL,
+    CORE_TUBE_TUBE_COL,
+    CORE_TUBE_COUNT_COL,
 )
 from CommonUtils import (
     build_merged_map,
@@ -510,6 +517,7 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
     finish_part_col = cols["finish_part_col"]
     accessory_part_col = cols["accessory_part_col"] if is_mes else None
     process_print_col = cols["process_print_col"]
+    stock_col = STOCK_COL if EXTRACT_STOCK else None
 
     for row_cells in ws.iter_rows(min_row=DATA_START_ROW, max_row=ws.max_row, max_col=max_col):
         r = row_cells[0].row
@@ -617,6 +625,12 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
             if qty_num == 0:
                 continue
 
+            # 재고 읽기 (행 단위)
+            stock_val = None
+            if stock_col and 1 <= stock_col <= len(values):
+                stock_raw = values[stock_col - 1]
+                stock_val = safe_float(stock_raw)
+
             if is_mes:
                 process = map_process_from_workshop(workshop_name)
                 workshop_raw = workshop_name or ""
@@ -639,6 +653,7 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
                     "공정인쇄": process_name_raw,
                     "원본행": r,
                     "원본열": dc["col"],
+                    "재고": stock_val,
                 })
             else:
                 records.append({
@@ -650,6 +665,7 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
                     "구분": dc["kind"],
                     "계획수량": qty_num,
                     "공정인쇄": process_name_raw,
+                    "재고": stock_val,
                 })
 
     df = pd.DataFrame(records)
@@ -685,6 +701,238 @@ def extract_plan_file(plan_file: str, progress=None) -> pd.DataFrame:
         return pd.DataFrame()
 
     return pd.concat(frames, ignore_index=True)
+
+
+def _col_letter_to_index(letter: str) -> int:
+    letter = (letter or "").upper().strip()
+    idx = 0
+    for ch in letter:
+        if not ('A' <= ch <= 'Z'):
+            continue
+        idx = idx * 26 + (ord(ch) - ord('A') + 1)
+    return idx
+
+
+def extract_core_tube_from_ws(ws, asof_date=None, start_date=None, end_date=None, progress=None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Extract header and tube requirement summaries from a CORE sheet.
+
+    Returns (header_df, tube_df)
+    """
+    start_col = find_date_start_col(ws)
+    if start_col is None:
+        raise RuntimeError(f"{ws.title}: 날짜 시작 열을 찾지 못했습니다.")
+
+    date_cols = build_plan_date_columns(ws)
+    if not date_cols:
+        raise RuntimeError(f"{ws.title}: 날짜 컬럼을 찾지 못했습니다.")
+
+    # column indexes: AppConstants give letters
+    h_idx = _col_letter_to_index(CORE_TUBE_HEADER_COL)
+    t_idx = _col_letter_to_index(CORE_TUBE_TUBE_COL)
+    tc_idx = _col_letter_to_index(CORE_TUBE_COUNT_COL)
+
+    # note: _col_letter_to_index returns 1-based index (A->1)
+    records = []
+    current_model = ""
+    model_col = build_header_lookup(ws).get("model_col")
+
+    total_rows = max(1, ws.max_row - DATA_START_ROW + 1)
+    min_col = 1
+    max_col = ws.max_column
+    nf = normalize_process_token
+    sf = safe_float
+    date_normalize = lambda d: pd.to_datetime(d).normalize().date()
+
+    rows_iter = ws.iter_rows(min_row=DATA_START_ROW, max_row=ws.max_row, min_col=min_col, max_col=max_col, values_only=True)
+    for i, row_vals in enumerate(rows_iter, start=1):
+        r = DATA_START_ROW + i - 1
+        # report progress occasionally
+        if progress and (i % 500 == 0 or i == 1):
+            pct = int(i / total_rows * 70)
+            progress(pct, f"행 {r} 처리중...")
+
+        try:
+            if model_col and row_vals[model_col - 1]:
+                mval = nf(row_vals[model_col - 1])
+                if mval:
+                    current_model = mval
+        except Exception:
+            pass
+
+        header_part = nf(row_vals[h_idx - 1]) if h_idx and h_idx <= max_col and row_vals[h_idx - 1] is not None else ""
+        tube_part = nf(row_vals[t_idx - 1]) if t_idx and t_idx <= max_col and row_vals[t_idx - 1] is not None else ""
+        try:
+            tube_count = sf(row_vals[tc_idx - 1]) if tc_idx and tc_idx <= max_col and row_vals[tc_idx - 1] is not None else 0
+        except Exception:
+            tube_count = 0
+
+        if not header_part and not tube_part:
+            continue
+
+        for dc in date_cols:
+            col_idx = dc["col"] - 1
+            if col_idx < 0 or col_idx >= len(row_vals):
+                continue
+            qty_raw = row_vals[col_idx]
+            qty = sf(qty_raw)
+            if qty == 0:
+                continue
+
+            records.append({
+                "모델": current_model,
+                "헤더품번": header_part,
+                "튜브플레이트품번": tube_part,
+                "튜브개수": tube_count,
+                "날짜": date_normalize(dc["date"]),
+                "수량": qty,
+            })
+
+    if progress:
+        progress(75, "요약 집계 중...")
+
+    if not records:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df = pd.DataFrame(records)
+
+    # Header: sum 수량*2
+    df_header = df.groupby(["헤더품번", "모델", "날짜"], dropna=False, as_index=False)["수량"].sum()
+    df_header["수량"] = df_header["수량"] * 2
+    header_wide = df_header.pivot_table(index=["헤더품번"], columns="날짜", values="수량", aggfunc="sum", fill_value=0)
+
+    # model map: first model per header
+    model_map = df.groupby("헤더품번")["모델"].first().to_dict()
+
+    dates = sorted([c for c in header_wide.columns if isinstance(c, (pd.Timestamp, datetime.datetime, datetime.date))])
+    backlog_name = "미달(이전)"
+    # determine asof for backlog calculations
+    asof_calc = asof_date or (start_date if start_date is not None else None)
+    if asof_calc is not None:
+        # sum past dates for backlog; but if past sum is negative (선생산), subtract it from future dates
+        past_sum = header_wide[[d for d in dates if d < asof_calc]].sum(axis=1) if dates else pd.Series(0, index=header_wide.index)
+        # determine display date range (include weekends by generating full daily range)
+        display_start = start_date if start_date is not None else asof_calc
+        display_end = end_date if end_date is not None else (max(dates) if dates else display_start)
+        display_dates = pd.to_datetime(pd.date_range(start=display_start, end=display_end, freq='D')).normalize().tolist()
+        # build adjusted future columns by applying past_sum (subtract negative past) per row
+        display_df = header_wide.reindex(columns=display_dates).fillna(0)
+        adj_df = pd.DataFrame(0, index=header_wide.index, columns=display_dates)
+        for idx in header_wide.index:
+            carry = past_sum.loc[idx] if isinstance(past_sum, pd.Series) else past_sum
+            for d in display_dates:
+                orig = display_df.at[idx, d] if d in display_df.columns else 0
+                adj = orig + carry
+                if adj < 0:
+                    adj_df.at[idx, d] = 0
+                    carry = adj
+                else:
+                    adj_df.at[idx, d] = adj
+                    carry = 0
+        # backlog shown as positive shortage only
+        header_wide[backlog_name] = past_sum.clip(lower=0)
+        # replace future date columns with adjusted values
+        for d in display_dates:
+            header_wide[d] = adj_df[d]
+    else:
+        header_wide[backlog_name] = 0
+        # include full continuous date range between min/max dates to keep weekends
+        if dates:
+            display_dates = pd.to_datetime(pd.date_range(start=min(dates), end=max(dates), freq='D')).normalize().tolist()
+        else:
+            display_dates = []
+
+    keep_cols = [backlog_name] + display_dates
+    header_out = header_wide.reindex(columns=keep_cols).fillna(0)
+    header_out["총소요량"] = header_out.sum(axis=1)
+    header_out.insert(0, "헤더품번", header_out.index)
+    header_out.insert(0, "모델명", header_out["헤더품번"].map(model_map))
+    header_out = header_out.reset_index(drop=True)
+
+    # Tube: sum 수량 * 튜브개수 (rename to 튜브플레이트)
+    df["튜브플레이트요청"] = df["수량"] * df["튜브개수"]
+    df_tube = df.groupby(["튜브플레이트품번", "모델", "날짜"], dropna=False, as_index=False)["튜브플레이트요청"].sum()
+    tube_wide = df_tube.pivot_table(index=["튜브플레이트품번"], columns="날짜", values="튜브플레이트요청", aggfunc="sum", fill_value=0)
+    tube_model_map = df.groupby("튜브플레이트품번")["모델"].first().to_dict()
+
+    dates_t = sorted([c for c in tube_wide.columns if isinstance(c, (pd.Timestamp, datetime.datetime, datetime.date))])
+    if asof_calc is not None:
+        past_sum_t = tube_wide[[d for d in dates_t if d < asof_calc]].sum(axis=1) if dates_t else pd.Series(0, index=tube_wide.index)
+        display_start_t = start_date if start_date is not None else asof_calc
+        display_end_t = end_date if end_date is not None else (max(dates_t) if dates_t else display_start_t)
+        display_dates_t = pd.to_datetime(pd.date_range(start=display_start_t, end=display_end_t, freq='D')).normalize().tolist()
+        display_df_t = tube_wide.reindex(columns=display_dates_t).fillna(0)
+        adj_df_t = pd.DataFrame(0, index=tube_wide.index, columns=display_dates_t)
+        for idx in tube_wide.index:
+            carry = past_sum_t.loc[idx] if isinstance(past_sum_t, pd.Series) else past_sum_t
+            for d in display_dates_t:
+                orig = display_df_t.at[idx, d] if d in display_df_t.columns else 0
+                adj = orig + carry
+                if adj < 0:
+                    adj_df_t.at[idx, d] = 0
+                    carry = adj
+                else:
+                    adj_df_t.at[idx, d] = adj
+                    carry = 0
+        tube_wide[backlog_name] = past_sum_t.clip(lower=0)
+        for d in display_dates_t:
+            tube_wide[d] = adj_df_t[d]
+    else:
+        tube_wide[backlog_name] = 0
+        if dates_t:
+            display_dates_t = pd.to_datetime(pd.date_range(start=min(dates_t), end=max(dates_t), freq='D')).normalize().tolist()
+        else:
+            display_dates_t = []
+
+    keep_t = [backlog_name] + display_dates_t
+    tube_out = tube_wide.reindex(columns=keep_t).fillna(0)
+    tube_out["총소요량"] = tube_out.sum(axis=1)
+    tube_out.insert(0, "튜브플레이트품번", tube_out.index)
+    tube_out.insert(0, "모델명", tube_out["튜브플레이트품번"].map(tube_model_map))
+    tube_out = tube_out.reset_index(drop=True)
+
+    # rename date columns to string YYYY/MM/DD for consistency
+    def _rename_dates(df_obj):
+        new_cols = []
+        for c in df_obj.columns:
+            if isinstance(c, (pd.Timestamp, datetime.datetime)):
+                new_cols.append(c.strftime("%Y/%m/%d"))
+            elif isinstance(c, datetime.date):
+                new_cols.append(c.strftime("%Y/%m/%d"))
+            else:
+                new_cols.append(c)
+        df_obj.columns = new_cols
+
+    if progress:
+        progress(90, "날짜 열 포맷 변환 중...")
+    _rename_dates(header_out)
+    _rename_dates(tube_out)
+
+    if progress:
+        progress(100, "완료")
+
+    return header_out, tube_out
+
+
+def export_core_tube_requirements(plan_file: str, asof_date_str: str = None, start_date_str: str = None, end_date_str: str = None, output_file: str = None, progress=None):
+    """High-level helper to export core/tube requirements from a plan file.
+
+    asof_date_str: YYYY-MM-DD
+    """
+    asof_date = pd.to_datetime(asof_date_str).date() if asof_date_str else None
+    start_date = pd.to_datetime(start_date_str).normalize().date() if start_date_str else None
+    end_date = pd.to_datetime(end_date_str).normalize().date() if end_date_str else None
+    wb = load_workbook(plan_file, data_only=True)
+    sheet_name = "CORE공정(실적)"
+    if sheet_name not in wb.sheetnames:
+        raise RuntimeError(f"{sheet_name} 시트가 없습니다: {plan_file}")
+
+    header_df, tube_df = extract_core_tube_from_ws(wb[sheet_name], asof_date=asof_date, start_date=start_date, end_date=end_date, progress=progress)
+    out = output_file or CORE_TUBE_OUTPUT_FILE
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        header_df.to_excel(writer, sheet_name="헤더소요량", index=False)
+        tube_df.to_excel(writer, sheet_name="튜브플레이트소요량", index=False)
+
+    return out
 
 
 # =========================

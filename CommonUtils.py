@@ -1,8 +1,9 @@
 from datetime import datetime, date
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, ttk, messagebox
 from typing import Optional
 import tkinter as tk
+from tkcalendar import Calendar
 
 import pandas as pd
 
@@ -223,3 +224,52 @@ def select_excel_save_file(title: str, source_file: str, suffix: str, parent=Non
         defaultextension=".xlsx",
         filetypes=[("Excel files", "*.xlsx")],
     )
+
+
+def select_date_range(parent):
+    win = tk.Toplevel(parent)
+    win.title("기간 선택")
+    win.geometry("620x330")
+    win.resizable(False, False)
+
+    selected = {"start": None, "end": None}
+
+    tk.Label(win, text="시작일").grid(row=0, column=0, padx=10, pady=(10, 0))
+    tk.Label(win, text="종료일").grid(row=0, column=1, padx=10, pady=(10, 0))
+
+    cal_start = Calendar(win, selectmode="day", date_pattern="yyyy-mm-dd")
+    cal_start.grid(row=1, column=0, padx=10, pady=10)
+
+    cal_end = Calendar(win, selectmode="day", date_pattern="yyyy-mm-dd")
+    cal_end.grid(row=1, column=1, padx=10, pady=10)
+
+    def confirm():
+        start = pd.to_datetime(cal_start.get_date()).normalize()
+        end = pd.to_datetime(cal_end.get_date()).normalize()
+
+        if start > end:
+            messagebox.showerror("오류", "시작일이 종료일보다 늦습니다.", parent=win)
+            return
+
+        selected["start"] = start
+        selected["end"] = end
+        win.destroy()
+
+    def no_filter():
+        selected["start"] = None
+        selected["end"] = None
+        win.destroy()
+
+    tk.Button(win, text="확인", width=15, command=confirm).grid(row=2, column=0, pady=10)
+    tk.Button(win, text="기간 필터 없이 진행", width=20, command=no_filter).grid(row=2, column=1, pady=10)
+
+    win.protocol("WM_DELETE_WINDOW", no_filter)
+    win.update_idletasks()
+    win.lift()
+    win.attributes("-topmost", True)
+    win.after(300, lambda: win.attributes("-topmost", False))
+    win.focus_force()
+    win.grab_set()
+
+    parent.wait_window(win)
+    return selected["start"], selected["end"]

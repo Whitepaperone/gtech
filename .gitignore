@@ -5,3 +5,30 @@ excel_watch/
 *.xlsx
 *.spec
 *.db
+*.fdb
+
+# Firebird DB files (local COA DB and copies)
+Data/*.fdb
+**/Data/*.fdb
+COAINV_copy.FDB
+
+# Backups and dumps
+*.fbk
+*.bak
+
+# Secrets / credentials
+*.env
+.env.*
+credentials.*
+secrets.*
+*.key
+*.pem
+*.pfx
+REG.CFG
+databases.conf
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

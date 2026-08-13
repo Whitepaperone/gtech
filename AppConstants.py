@@ -40,6 +40,12 @@ DEFAULT_CONFIG = {
         "작업지시수량", "판정",
     ],
     "coa_exclude_customers": ["HD건설기계㈜인천"],
+    "extract_stock": False,
+    "stock_col": 30,
+    "core_tube_output_file": "./생산계획_헤더튜브_소요량.xlsx",
+    "core_tube_header_col": "H",
+    "core_tube_tube_col": "I",
+    "core_tube_count_col": "J"
 }
 
 
@@ -53,9 +59,18 @@ def _candidate_config_paths():
 def _load_config():
     for path in _candidate_config_paths():
         if path.exists():
-            with path.open("r", encoding="utf-8") as f:
-                loaded = json.load(f)
-            return {**DEFAULT_CONFIG, **loaded}
+            try:
+                # use utf-8-sig to tolerate BOM if present
+                with path.open("r", encoding="utf-8-sig") as f:
+                    loaded = json.load(f)
+                if not isinstance(loaded, dict):
+                    print(f"WARNING: config file {path} did not contain a JSON object; ignoring.")
+                    continue
+                return {**DEFAULT_CONFIG, **loaded}
+            except Exception as e:
+                # don't raise on import — fall back to defaults and warn
+                print(f"WARNING: Failed to load config from {path}: {e}")
+                continue
 
     return DEFAULT_CONFIG
 
@@ -79,3 +94,12 @@ MES_SHEET_CONFIG = CONFIG["mes_sheet_config"]
 WORKSHOP_TO_PROCESS = CONFIG["workshop_to_process"]
 FINAL_COMPARE_COLUMNS = CONFIG["final_compare_columns"]
 COA_EXCLUDE_CUSTOMERS = CONFIG["coa_exclude_customers"]
+EXTRACT_STOCK = CONFIG.get("extract_stock", False)
+try:
+    STOCK_COL = int(CONFIG.get("stock_col", DEFAULT_CONFIG.get("stock_col")))
+except Exception:
+    STOCK_COL = DEFAULT_CONFIG.get("stock_col")
+CORE_TUBE_OUTPUT_FILE = CONFIG.get("core_tube_output_file")
+CORE_TUBE_HEADER_COL = CONFIG.get("core_tube_header_col", "H")
+CORE_TUBE_TUBE_COL = CONFIG.get("core_tube_tube_col", "I")
+CORE_TUBE_COUNT_COL = CONFIG.get("core_tube_count_col", "J")
