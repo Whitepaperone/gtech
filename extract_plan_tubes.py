@@ -167,8 +167,8 @@ def build_summary(working, header_col, tube_col, tube_count_col, date_col, qty_c
     # add backlog column and format date columns as strings
     dates = sorted([c for c in header_pivot.columns if isinstance(c, (datetime.date, datetime.datetime, pd.Timestamp))])
     backlog_col_name = '미달(이전)'
-    # compute past sum; if negative (pre-production) subtract from future dates
-    past_sum = header_pivot[[d for d in dates if d < asof_date]].sum(axis=1) if dates else pd.Series(0, index=header_pivot.index)
+    # show only the asof_date day's value as backlog; do NOT include past days
+    past_sum = header_pivot.get(asof_date, pd.Series(0, index=header_pivot.index)) if asof_date in header_pivot.columns else pd.Series(0, index=header_pivot.index)
     # build continuous display dates including weekends
     display_start = asof_date
     display_end = max(dates) if dates else display_start
@@ -217,7 +217,7 @@ def build_summary(working, header_col, tube_col, tube_count_col, date_col, qty_c
         tube_model_map = tm.to_dict()
 
     dates_t = sorted([c for c in tube_pivot.columns if isinstance(c, (datetime.date, datetime.datetime, pd.Timestamp))])
-    past_sum_t = tube_pivot[[d for d in dates_t if d < asof_date]].sum(axis=1) if dates_t else pd.Series(0, index=tube_pivot.index)
+    past_sum_t = tube_pivot.get(asof_date, pd.Series(0, index=tube_pivot.index)) if asof_date in tube_pivot.columns else pd.Series(0, index=tube_pivot.index)
     # include full daily date range between asof and last date (keep weekends)
     display_start_t = asof_date
     display_end_t = max(dates_t) if dates_t else display_start_t

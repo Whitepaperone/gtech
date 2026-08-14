@@ -722,7 +722,19 @@ def extract_core_tube_from_ws(ws, asof_date=None, start_date=None, end_date=None
     if start_col is None:
         raise RuntimeError(f"{ws.title}: 날짜 시작 열을 찾지 못했습니다.")
 
-    date_cols = build_plan_date_columns(ws)
+    # 계획 열과 사용자가 선택한 날짜의 미달 열을 함께 읽는다.
+    # 미달은 계획 수량과 섞지 않고 아래에서 별도로 집계한다.
+    asof_calc = asof_date or (start_date if start_date is not None else None)
+    selected_date = pd.to_datetime(asof_calc).normalize() if asof_calc is not None else None
+    date_cols = [
+        dc for dc in build_mes_date_columns(ws)
+        if dc["kind"] == "계획"
+        or (
+            selected_date is not None
+            and dc["kind"] == "미달"
+            and dc["date"] == selected_date
+        )
+    ]
     if not date_cols:
         raise RuntimeError(f"{ws.title}: 날짜 컬럼을 찾지 못했습니다.")
 
@@ -784,6 +796,7 @@ def extract_core_tube_from_ws(ws, asof_date=None, start_date=None, end_date=None
                 "튜브플레이트품번": tube_part,
                 "튜브개수": tube_count,
                 "날짜": date_normalize(dc["date"]),
+                "구분": dc["kind"],
                 "수량": qty,
             })
 
@@ -795,8 +808,11 @@ def extract_core_tube_from_ws(ws, asof_date=None, start_date=None, end_date=None
 
     df = pd.DataFrame(records)
 
-    # Header: sum 수량*2
-    df_header = df.groupby(["헤더품번", "모델", "날짜"], dropna=False, as_index=False)["수량"].sum()
+    plan_df = df[df["구분"] == "계획"].copy()
+    shortage_df = df[df["구분"] == "미달"].copy()
+
+    # Header: 계획 수량*2. 선택 날짜의 미달은 별도 집계한다.
+    df_header = plan_df.groupby(["헤더품번", "모델", "날짜"], dropna=False, as_index=False)["수량"].sum()
     df_header["수량"] = df_header["수량"] * 2
     header_wide = df_header.pivot_table(index=["헤더품번"], columns="날짜", values="수량", aggfunc="sum", fill_value=0)
 
@@ -805,20 +821,19 @@ def extract_core_tube_from_ws(ws, asof_date=None, start_date=None, end_date=None
 
     dates = sorted([c for c in header_wide.columns if isinstance(c, (pd.Timestamp, datetime.datetime, datetime.date))])
     backlog_name = "미달(이전)"
-    # determine asof for backlog calculations
-    asof_calc = asof_date or (start_date if start_date is not None else None)
     if asof_calc is not None:
-        # sum past dates for backlog; but if past sum is negative (선생산), subtract it from future dates
-        past_sum = header_wide[[d for d in dates if d < asof_calc]].sum(axis=1) if dates else pd.Series(0, index=header_wide.index)
+        header_shortage = shortage_df.groupby("헤더품번")["수량"].sum().mul(2)
+        asof_day_value = header_shortage.reindex(header_wide.index, fill_value=0)
         # determine display date range (include weekends by generating full daily range)
         display_start = start_date if start_date is not None else asof_calc
         display_end = end_date if end_date is not None else (max(dates) if dates else display_start)
         display_dates = pd.to_datetime(pd.date_range(start=display_start, end=display_end, freq='D')).normalize().tolist()
-        # build adjusted future columns by applying past_sum (subtract negative past) per row
+        # build adjusted columns: apply asof_date value's carry starting from asof_date forward
         display_df = header_wide.reindex(columns=display_dates).fillna(0)
         adj_df = pd.DataFrame(0, index=header_wide.index, columns=display_dates)
         for idx in header_wide.index:
-            carry = past_sum.loc[idx] if isinstance(past_sum, pd.Series) else past_sum
+            # 음수 미달(선생산)만 이후 계획에서 날짜순으로 차감한다.
+            carry = min(asof_day_value.loc[idx], 0)
             for d in display_dates:
                 orig = display_df.at[idx, d] if d in display_df.columns else 0
                 adj = orig + carry
@@ -828,9 +843,9 @@ def extract_core_tube_from_ws(ws, asof_date=None, start_date=None, end_date=None
                 else:
                     adj_df.at[idx, d] = adj
                     carry = 0
-        # backlog shown as positive shortage only
-        header_wide[backlog_name] = past_sum.clip(lower=0)
-        # replace future date columns with adjusted values
+        # backlog: show asof_date day's value as positive (미달) only
+        header_wide[backlog_name] = asof_day_value.clip(lower=0)
+        # replace display date columns with adjusted values
         for d in display_dates:
             header_wide[d] = adj_df[d]
     else:
@@ -846,24 +861,30 @@ def extract_core_tube_from_ws(ws, asof_date=None, start_date=None, end_date=None
     header_out["총소요량"] = header_out.sum(axis=1)
     header_out.insert(0, "헤더품번", header_out.index)
     header_out.insert(0, "모델명", header_out["헤더품번"].map(model_map))
+    # reorder so '총소요량' is placed before the date columns
+    date_cols_after = [c for c in header_out.columns if c not in ("모델명", "헤더품번", "총소요량")]
+    header_out = header_out[["모델명", "헤더품번", "총소요량"] + date_cols_after]
     header_out = header_out.reset_index(drop=True)
 
     # Tube: sum 수량 * 튜브개수 (rename to 튜브플레이트)
-    df["튜브플레이트요청"] = df["수량"] * df["튜브개수"]
-    df_tube = df.groupby(["튜브플레이트품번", "모델", "날짜"], dropna=False, as_index=False)["튜브플레이트요청"].sum()
+    plan_df["튜브플레이트요청"] = plan_df["수량"] * plan_df["튜브개수"]
+    shortage_df["튜브플레이트요청"] = shortage_df["수량"] * shortage_df["튜브개수"]
+    df_tube = plan_df.groupby(["튜브플레이트품번", "모델", "날짜"], dropna=False, as_index=False)["튜브플레이트요청"].sum()
     tube_wide = df_tube.pivot_table(index=["튜브플레이트품번"], columns="날짜", values="튜브플레이트요청", aggfunc="sum", fill_value=0)
     tube_model_map = df.groupby("튜브플레이트품번")["모델"].first().to_dict()
 
     dates_t = sorted([c for c in tube_wide.columns if isinstance(c, (pd.Timestamp, datetime.datetime, datetime.date))])
     if asof_calc is not None:
-        past_sum_t = tube_wide[[d for d in dates_t if d < asof_calc]].sum(axis=1) if dates_t else pd.Series(0, index=tube_wide.index)
+        tube_shortage = shortage_df.groupby("튜브플레이트품번")["튜브플레이트요청"].sum()
+        asof_day_value_t = tube_shortage.reindex(tube_wide.index, fill_value=0)
         display_start_t = start_date if start_date is not None else asof_calc
         display_end_t = end_date if end_date is not None else (max(dates_t) if dates_t else display_start_t)
         display_dates_t = pd.to_datetime(pd.date_range(start=display_start_t, end=display_end_t, freq='D')).normalize().tolist()
         display_df_t = tube_wide.reindex(columns=display_dates_t).fillna(0)
         adj_df_t = pd.DataFrame(0, index=tube_wide.index, columns=display_dates_t)
         for idx in tube_wide.index:
-            carry = past_sum_t.loc[idx] if isinstance(past_sum_t, pd.Series) else past_sum_t
+            # 음수 미달(선생산)만 이후 계획에서 날짜순으로 차감한다.
+            carry = min(asof_day_value_t.loc[idx], 0)
             for d in display_dates_t:
                 orig = display_df_t.at[idx, d] if d in display_df_t.columns else 0
                 adj = orig + carry
@@ -873,7 +894,7 @@ def extract_core_tube_from_ws(ws, asof_date=None, start_date=None, end_date=None
                 else:
                     adj_df_t.at[idx, d] = adj
                     carry = 0
-        tube_wide[backlog_name] = past_sum_t.clip(lower=0)
+        tube_wide[backlog_name] = asof_day_value_t.clip(lower=0)
         for d in display_dates_t:
             tube_wide[d] = adj_df_t[d]
     else:
@@ -888,6 +909,9 @@ def extract_core_tube_from_ws(ws, asof_date=None, start_date=None, end_date=None
     tube_out["총소요량"] = tube_out.sum(axis=1)
     tube_out.insert(0, "튜브플레이트품번", tube_out.index)
     tube_out.insert(0, "모델명", tube_out["튜브플레이트품번"].map(tube_model_map))
+    # reorder so '총소요량' is placed before the date columns
+    date_cols_after_t = [c for c in tube_out.columns if c not in ("모델명", "튜브플레이트품번", "총소요량")]
+    tube_out = tube_out[["모델명", "튜브플레이트품번", "총소요량"] + date_cols_after_t]
     tube_out = tube_out.reset_index(drop=True)
 
     # rename date columns to string YYYY/MM/DD for consistency
