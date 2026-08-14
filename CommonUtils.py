@@ -226,9 +226,9 @@ def select_excel_save_file(title: str, source_file: str, suffix: str, parent=Non
     )
 
 
-def select_date_range(parent):
+def select_date_range(parent, title="기간 선택"):
     win = tk.Toplevel(parent)
-    win.title("기간 선택")
+    win.title(title)
     win.geometry("620x330")
     win.resizable(False, False)
 

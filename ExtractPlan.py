@@ -33,6 +33,71 @@ from CommonUtils import (
     safe_float,
 )
 
+
+class _CalamineFont:
+    color = None
+
+
+class _CalamineCell:
+    font = _CalamineFont()
+
+    def __init__(self, value, row: int, column: int):
+        self.value = value
+        self.row = row
+        self.column = column
+
+
+class _NoMergedCells:
+    ranges = ()
+
+
+class CalamineWorksheet:
+    """기존 추출 로직이 calamine DataFrame을 워크시트처럼 읽게 하는 어댑터."""
+
+    merged_cells = _NoMergedCells()
+
+    def __init__(self, title: str, frame: pd.DataFrame):
+        self.title = title
+        self._frame = frame
+        self.max_row = len(frame.index)
+        self.max_column = len(frame.columns)
+
+    def _value(self, row: int, column: int):
+        if row < 1 or column < 1 or row > self.max_row or column > self.max_column:
+            return None
+        value = self._frame.iat[row - 1, column - 1]
+        try:
+            return None if pd.isna(value) else value
+        except (TypeError, ValueError):
+            return value
+
+    def cell(self, row: int, column: int):
+        return _CalamineCell(self._value(row, column), row, column)
+
+    def iter_rows(
+        self,
+        min_row=1,
+        max_row=None,
+        min_col=1,
+        max_col=None,
+        values_only=False,
+    ):
+        max_row = min(max_row or self.max_row, self.max_row)
+        max_col = min(max_col or self.max_column, self.max_column)
+        for row in range(min_row, max_row + 1):
+            if values_only:
+                yield tuple(self._value(row, col) for col in range(min_col, max_col + 1))
+            else:
+                yield tuple(self.cell(row, col) for col in range(min_col, max_col + 1))
+
+
+def load_calamine_worksheets(plan_file: str, sheet_names) -> Dict[str, CalamineWorksheet]:
+    """필요한 생산계획 시트만 calamine으로 읽는다."""
+    with pd.ExcelFile(plan_file, engine="calamine") as excel_file:
+        selected = [name for name in sheet_names if name in excel_file.sheet_names]
+        frames = pd.read_excel(excel_file, sheet_name=selected, header=None)
+    return {name: CalamineWorksheet(name, frame) for name, frame in frames.items()}
+
 # =========================
 # 설정
 # =========================
@@ -172,8 +237,14 @@ def starts_with_alpha_part_no(part_no) -> bool:
 # =========================
 # 생산계획 추출
 # =========================
-def extract_finish_plan_sheet(ws) -> pd.DataFrame:
-    return _extract_plan_sheet(ws, mode="finish")
+def extract_finish_plan_sheet(ws, config: Optional[Dict] = None) -> pd.DataFrame:
+    """완성공정 계획을 추출한다.
+
+    ``config``를 생략하면 기존 전역 설정을 그대로 사용한다. 특정 프로그램에서만
+    재고를 읽고 싶을 때는 ``{"extract_stock": True, "stock_col": 30}``처럼
+    호출별 설정을 넘길 수 있다.
+    """
+    return _extract_plan_sheet(ws, mode="finish", config=config)
 
 
 def build_mes_date_columns(ws) -> List[Dict]:
@@ -363,16 +434,20 @@ def filter_work_order_period(df: pd.DataFrame, start_date=None, end_date=None) -
     return out.copy()
 
 
-def extract_work_order_file(plan_file: str, progress=None) -> pd.DataFrame:
+def extract_work_order_file(plan_file: str, progress=None, check_red_font: bool = False) -> pd.DataFrame:
     if progress:
         progress(8, "생산계획 통합 문서를 여는 중...")
 
-    wb = load_workbook(plan_file, data_only=True)
+    if check_red_font:
+        wb = load_workbook(plan_file, data_only=True)
+        worksheets = {name: wb[name] for name in wb.sheetnames}
+    else:
+        worksheets = load_calamine_worksheets(plan_file, MES_SHEET_CONFIG.keys())
     frames = []
     sheet_items = [
         (sheet_name, config)
         for sheet_name, config in MES_SHEET_CONFIG.items()
-        if sheet_name in wb.sheetnames
+        if sheet_name in worksheets
     ]
     total = max(len(sheet_items), 1)
 
@@ -388,9 +463,9 @@ def extract_work_order_file(plan_file: str, progress=None) -> pd.DataFrame:
                 progress(base + (percent / 100 * span), text or f"{sheet_name} 시트 추출 중...")
 
         df_sheet = extract_plan_sheet(
-            wb[sheet_name],
+            worksheets[sheet_name],
             config,
-            check_red_font=True,
+            check_red_font=check_red_font,
             progress=sheet_progress,
         )
         if not df_sheet.empty:
@@ -517,7 +592,14 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
     finish_part_col = cols["finish_part_col"]
     accessory_part_col = cols["accessory_part_col"] if is_mes else None
     process_print_col = cols["process_print_col"]
-    stock_col = STOCK_COL if EXTRACT_STOCK else None
+    extract_stock = bool(config.get("extract_stock", EXTRACT_STOCK))
+    include_accessory = bool(config.get("include_accessory", True))
+    configured_stock_col = config.get("stock_col", STOCK_COL)
+    try:
+        configured_stock_col = int(configured_stock_col)
+    except (TypeError, ValueError):
+        configured_stock_col = STOCK_COL
+    stock_col = configured_stock_col if extract_stock else None
 
     for row_cells in ws.iter_rows(min_row=DATA_START_ROW, max_row=ws.max_row, max_col=max_col):
         r = row_cells[0].row
@@ -567,6 +649,8 @@ def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_
             stop_prefix = "단품" if is_mes else "제외"
             if first_col_text.startswith(stop_prefix):
                 break
+            if not include_accessory:
+                continue
 
         if "제외" in first_col_text:
             continue

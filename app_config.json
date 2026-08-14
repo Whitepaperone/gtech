@@ -47,6 +47,12 @@
   "coa_exclude_customers": ["HD건설기계㈜인천"]
   ,"extract_stock": false,
   "stock_col": 30
+  ,"coa_stock": {
+    "sheet_names": ["완성공정(실적)"],
+    "part_col": "F",
+    "stock_col": "AD",
+    "data_start_row": 35
+  }
   ,"core_tube_output_file": "./생산계획_헤더튜브_소요량.xlsx",
   "core_tube_header_col": "H",
   "core_tube_tube_col": "I",

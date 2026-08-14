@@ -21,7 +21,10 @@ from CommonUtils import (
     select_excel_file,
     select_date_range,
 )
-from ExtractPlan import extract_plan_sheet as extract_plan_sheet_from_module
+from ExtractPlan import (
+    extract_plan_sheet as extract_plan_sheet_from_module,
+    load_calamine_worksheets,
+)
 
 # =========================
 # 상수
@@ -89,12 +92,16 @@ def map_process_from_workshop(name: str) -> Optional[str]:
 
 
 def extract_plan_all(plan_file: str, progress=None) -> pd.DataFrame:
-    wb = load_workbook(plan_file, data_only=True)
+    if CHECK_RED_FONT:
+        wb = load_workbook(plan_file, data_only=True)
+        worksheets = {name: wb[name] for name in wb.sheetnames}
+    else:
+        worksheets = load_calamine_worksheets(plan_file, SHEET_CONFIG.keys())
     frames = []
     total = len(SHEET_CONFIG)
 
     for i, (sheet_name, config) in enumerate(SHEET_CONFIG.items(), start=1):
-        if sheet_name not in wb.sheetnames:
+        if sheet_name not in worksheets:
             if progress:
                 progress(20 + int(i / total * 25), f"{sheet_name} 시트 없음, 건너뜀")
             continue
@@ -102,7 +109,7 @@ def extract_plan_all(plan_file: str, progress=None) -> pd.DataFrame:
         if progress:
             progress(20 + int((i - 1) / total * 25), f"{sheet_name} 계획 추출 중...")
 
-        ws = wb[sheet_name]
+        ws = worksheets[sheet_name]
         df_sheet = extract_plan_sheet_from_module(
             ws,
             config,

@@ -4,7 +4,7 @@ from tkinter import filedialog
 import pandas as pd
 from openpyxl import load_workbook
 
-from AppConstants import COA_EXCLUDE_CUSTOMERS, FINISH_PLAN_SHEET_NAMES
+from AppConstants import COA_EXCLUDE_CUSTOMERS, FINISH_PLAN_SHEET_NAMES, STOCK_COL
 from CommonUtils import (
     create_progress_window,
     normalize_part_no,
@@ -21,7 +21,7 @@ SHEET_NAME = FINISH_PLAN_SHEET_NAMES
 EXCLUDE_CUSTOMERS = COA_EXCLUDE_CUSTOMERS
 
 
-def extract_plan_file(plan_file: str, progress=None) -> pd.DataFrame:
+def extract_plan_file(plan_file: str, progress=None, extract_stock: bool = False) -> pd.DataFrame:
     if progress:
         progress(0, "생산계획 파일 열기 중...")
     
@@ -40,7 +40,8 @@ def extract_plan_file(plan_file: str, progress=None) -> pd.DataFrame:
             progress(35 + int((i - 1) / total * 50), f"{sheet_name} 추출 중...")
 
         ws = wb[sheet_name]
-        df = extract_finish_plan_sheet_from_module(ws)
+        config = {"extract_stock": True, "stock_col": STOCK_COL} if extract_stock else None
+        df = extract_finish_plan_sheet_from_module(ws, config=config)
 
         frames.append(df)
 
@@ -59,9 +60,22 @@ def extract_plan_file(plan_file: str, progress=None) -> pd.DataFrame:
 # 수주 파일 추출
 # =========================
 def extract_order_file(order_file: str) -> pd.DataFrame:
-    df = pd.read_excel(order_file, header=0)
-
     required_cols = ["수주번호", "날짜", "납기", "출고(고객)사", "품번", "품명", "규격", "수량", "할당수량", "잔여량", "비고"]
+
+    # COA 내보내기는 보통 A열이 비고 B열부터 헤더가 시작한다. 파일에 제목행이
+    # 추가되는 경우도 있으므로 첫 20행에서 필수 헤더가 가장 많이 있는 행을 찾는다.
+    preview = pd.read_excel(order_file, header=None, nrows=20)
+    best_header_row = 0
+    best_match_count = -1
+    for row_idx, row in preview.iterrows():
+        values = {normalize_process_token(value) for value in row.tolist()}
+        match_count = sum(col in values for col in required_cols)
+        if match_count > best_match_count:
+            best_header_row = row_idx
+            best_match_count = match_count
+
+    df = pd.read_excel(order_file, header=best_header_row)
+    df.columns = [normalize_process_token(col) for col in df.columns]
 
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
@@ -90,6 +104,7 @@ def extract_order_file(order_file: str) -> pd.DataFrame:
     df = df[df["납기"].notna()].copy()
 
     return df
+
 
 # =========================
 # 품번 매핑
@@ -291,12 +306,14 @@ def main():
     if not order_file:
         messagebox.showinfo("알림", "수주 파일을 선택하지 않았습니다.")
         return
-    
-    mapping_file = filedialog.askopenfilename(title="품번매핑 파일 선택")
+
+    mapping_file = filedialog.askopenfilename(
+        title="품번매핑 파일 선택",
+        filetypes=[("Excel files", "*.xlsx *.xlsm *.xls")],
+    )
     if not mapping_file:
         messagebox.showinfo("알림", "품번매핑 파일을 선택하지 않았습니다. 매핑 없이 진행합니다.")
         mapping_file = None
-
 
     save_file = select_excel_save_file("결과 파일 저장", plan_file, "COA수주_비교", root)
     if not save_file:
@@ -320,9 +337,7 @@ def main():
 
         progress(92, "수주잔량과 생산계획 비교 중...")
         compare_df, past_order_df, future_order_df, remain_plan_df = compare_order_balance_vs_plan(
-            plan_df,
-            order_df,
-            horizon_weeks=6
+            plan_df, order_df, horizon_weeks=6
         )
 
         progress(96, "엑셀 저장 중...")

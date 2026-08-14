@@ -42,6 +42,12 @@ DEFAULT_CONFIG = {
     "coa_exclude_customers": ["HD건설기계㈜인천"],
     "extract_stock": False,
     "stock_col": 30,
+    "coa_stock": {
+        "sheet_names": ["완성공정(실적)"],
+        "part_col": "F",
+        "stock_col": "AD",
+        "data_start_row": 35,
+    },
     "core_tube_output_file": "./생산계획_헤더튜브_소요량.xlsx",
     "core_tube_header_col": "H",
     "core_tube_tube_col": "I",
@@ -94,6 +100,7 @@ MES_SHEET_CONFIG = CONFIG["mes_sheet_config"]
 WORKSHOP_TO_PROCESS = CONFIG["workshop_to_process"]
 FINAL_COMPARE_COLUMNS = CONFIG["final_compare_columns"]
 COA_EXCLUDE_CUSTOMERS = CONFIG["coa_exclude_customers"]
+COA_STOCK_CONFIG = CONFIG.get("coa_stock", DEFAULT_CONFIG["coa_stock"])
 EXTRACT_STOCK = CONFIG.get("extract_stock", False)
 try:
     STOCK_COL = int(CONFIG.get("stock_col", DEFAULT_CONFIG.get("stock_col")))

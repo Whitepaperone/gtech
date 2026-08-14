@@ -35,11 +35,21 @@ def main():
 
     try:
         start_date, end_date = select_date_range(root)
+        check_red_font = messagebox.askyesno(
+            "빨간 글씨 제외",
+            "생산계획의 빨간 글씨 수량을 제외하시겠습니까?\n\n"
+            "예: 서식 확인을 위해 기존 방식 사용\n"
+            "아니오: calamine 고속 읽기 사용",
+        )
 
         progress_win, progress = create_progress_window(root, "작업지시 생성 중")
         progress(5, "생산계획 파일을 읽는 중...")
 
-        plan_df = extract_work_order_file(file_path, progress=progress)
+        plan_df = extract_work_order_file(
+            file_path,
+            progress=progress,
+            check_red_font=check_red_font,
+        )
 
         progress(78, "선택한 기간의 계획을 정리하는 중...")
         plan_df = filter_work_order_period(plan_df, start_date=start_date, end_date=end_date)

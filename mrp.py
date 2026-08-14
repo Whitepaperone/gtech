@@ -1,281 +1,347 @@
-from openpyxl import load_workbook
-import pandas as pd
+from pathlib import Path
+import sys
 from tkinter import Tk, messagebox
-from datetime import datetime
+from datetime import date, datetime
+
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill
 
 from CommonUtils import (
     apply_quantities_by_part_left_to_right,
-    load_actual_quantities_by_part,
+    find_column_by_keywords,
+    normalize_part_no,
+    normalize_process_token,
+    select_date_range,
     select_excel_file,
+    select_excel_save_file,
 )
-
-OUTPUT_FILE = "./output.xlsx"
-
-
-def is_date_header_value(value):
-    if pd.isna(value):
-        return False
-
-    if isinstance(value, (datetime, pd.Timestamp)):
-        return True
-
-    if isinstance(value, str):
-        text = value.strip()
-        if "/" in text or "-" in text:
-            return not pd.isna(pd.to_datetime(text, errors="coerce"))
-        return False
-
-    # Plain production quantities like 5, 12, 100 are not date headers.
-    # Real Excel serial dates are normally large numbers around 40000+.
-    if isinstance(value, (int, float)) and value > 20000:
-        return not pd.isna(pd.to_datetime(value, unit="D", origin="1899-12-30", errors="coerce"))
-
-    return False
+from ExtractPlan import extract_plan_sheet, load_calamine_worksheets
 
 
-def format_date_header(value):
-    if isinstance(value, str):
-        text = value.strip()
-        if text:
-            return text
-
-    if isinstance(value, (datetime, pd.Timestamp)):
-        dt = pd.to_datetime(value)
-        if dt.year == datetime.now().year:
-            return f"{dt.month}/{dt.day}"
-        return f"{dt.year}/{dt.month}/{dt.day}"
-
-    if isinstance(value, (int, float)) and value > 20000:
-        dt = pd.to_datetime(value, unit="D", origin="1899-12-30")
-        if dt.year == datetime.now().year:
-            return f"{dt.month}/{dt.day}"
-        return f"{dt.year}/{dt.month}/{dt.day}"
-
-    return str(value).strip()
-
-
-def find_date_columns(df):
-    """
-    날짜 열 자동 탐지
-    - 날짜가 연속되지 않아도 실제 날짜 컬럼만 수집
-    """
-    for row_idx in range(0, 10):
-        row = df.iloc[row_idx]
-        date_cols = []
-
-        for i, val in enumerate(row):
-            if is_date_header_value(val):
-                date_cols.append(i)
-
-        if len(date_cols) >= 1:
-            return row_idx, date_cols
-
-    raise Exception("날짜 열을 찾을 수 없습니다.")
-
-
-def find_data_start_row(df, start_col, end_col):
-    """
-    실제 데이터 시작 행 찾기
-    """
-    for i in range(0, len(df)):
-        row = df.iloc[i, start_col:end_col]
-
-        # 숫자 포함된 행 찾기
-        numeric_count = sum(
-            1 for x in row
-            if isinstance(x, (int, float)) and not pd.isna(x)
-        )
-
-        if numeric_count >= 1:
-            return i
-
-    raise Exception("데이터 시작 행을 찾을 수 없습니다.")
+PLAN_SHEETS = (
+    ("완성공정(실적)", "완성", "완성시트"),
+    ("TANK공정(실적)", "TANK", "TANK공정시트"),
+)
+CORE_OUTPUT_SHEET = "CORE공정시트"
 
 
 def adjust_row(values):
-    """
-    재고 → 미래 계획 차감
-    """
-    stock = 0
-    result = values.copy()
-
-    # 첫날 음수 → 선생산량
-    if result[0] < 0:
+    """첫 열의 음수 미달(선생산)을 뒤쪽 계획에서 날짜순으로 차감한다."""
+    result = [float(v) for v in values]
+    stock = 0.0
+    if result and result[0] < 0:
         stock = abs(result[0])
-        result[0] = 0
+        result[0] = 0.0
 
     for i in range(1, len(result)):
         if stock <= 0:
             break
-
-        val = result[i]
-
-        if pd.isna(val):
-            continue
-
-        if val > 0:
-            if val >= stock:
-                result[i] -= stock
-                stock = 0
-            else:
-                stock -= val
-                result[i] = 0
-
+        used = min(max(result[i], 0), stock)
+        result[i] -= used
+        stock -= used
     return result
+
+
+def _first_sheet_name(file_path):
+    with pd.ExcelFile(file_path, engine="calamine") as excel_file:
+        if not excel_file.sheet_names:
+            raise RuntimeError(f"{Path(file_path).name}: 시트가 없습니다.")
+        return excel_file.sheet_names[0]
+
+
+def extract_mrp_source(file_path, sheet_name, default_process):
+    worksheets = load_calamine_worksheets(file_path, [sheet_name])
+    if sheet_name not in worksheets:
+        raise RuntimeError(f"{Path(file_path).name}: {sheet_name} 시트가 없습니다.")
+    return extract_plan_sheet(
+        worksheets[sheet_name],
+        {"default_process": default_process},
+    )
+
+
+def _as_date(value):
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        return pd.to_datetime(value, errors="coerce").normalize()
+    if isinstance(value, (int, float)) and value > 20000:
+        return pd.to_datetime(value, unit="D", origin="1899-12-30", errors="coerce").normalize()
+    if isinstance(value, str) and ("/" in value or "-" in value):
+        return pd.to_datetime(value.strip(), errors="coerce").normalize()
+    return pd.NaT
+
+
+def build_processed_core_sheet(file_path, sheet_name, start_date, end_date, actuals):
+    """기존 MRP 가공 형식의 Core 시트를 읽는다.
+
+    가공본의 첫 날짜 열은 기준일 미달이므로 기간과 무관하게 보존한다.
+    나머지 날짜 열에만 사용자가 선택한 기간을 적용한다.
+    """
+    raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+    date_row_idx = None
+    all_date_cols = []
+    date_values = {}
+    for row_idx in range(min(10, len(raw))):
+        found = []
+        for col_idx, value in enumerate(raw.iloc[row_idx]):
+            parsed = _as_date(value)
+            if not pd.isna(parsed):
+                found.append(col_idx)
+                date_values[col_idx] = parsed
+        if found:
+            date_row_idx, all_date_cols = row_idx, found
+            break
+    if date_row_idx is None:
+        raise RuntimeError(f"{sheet_name}: 날짜 헤더를 찾지 못했습니다.")
+
+    shortage_col = all_date_cols[0]
+    selected_date_cols = [shortage_col]
+    for col_idx in all_date_cols[1:]:
+        day = date_values[col_idx]
+        if start_date is not None and day < pd.Timestamp(start_date):
+            continue
+        if end_date is not None and day > pd.Timestamp(end_date):
+            continue
+        selected_date_cols.append(col_idx)
+
+    if len(selected_date_cols) == 1:
+        raise RuntimeError(f"{sheet_name}: 선택 기간에 해당하는 계획 날짜가 없습니다.")
+
+    start_col = min(all_date_cols)
+    header_rows = raw.iloc[: date_row_idx + 1]
+
+    def find_metadata_col(keywords, fallback):
+        for col_idx in range(start_col):
+            text = " ".join(str(v) for v in header_rows.iloc[:, col_idx] if not pd.isna(v))
+            normalized = normalize_process_token(text)
+            if all(normalize_process_token(k) in normalized for k in keywords):
+                return col_idx
+        return fallback
+
+    model_col = find_metadata_col(("모델",), start_col - 3)
+    customer_col = find_metadata_col(("고객", "품번"), start_col - 2)
+    part_col = find_metadata_col(("품번",), start_col - 1)
+    # 고객사 품번이 먼저 발견되는 경우 품번은 날짜 바로 앞 열을 우선한다.
+    if part_col == customer_col:
+        part_col = start_col - 1
+
+    rows = []
+    for row_idx in range(date_row_idx + 1, len(raw)):
+        part_no = normalize_part_no(raw.iat[row_idx, part_col])
+        if not part_no:
+            continue
+        quantities = [pd.to_numeric(raw.iat[row_idx, c], errors="coerce") for c in selected_date_cols]
+        quantities = [0.0 if pd.isna(v) else float(v) for v in quantities]
+        if not any(quantities):
+            continue
+        rows.append({
+            "품번": part_no,
+            "모델": raw.iat[row_idx, model_col],
+            "고객사품번": raw.iat[row_idx, customer_col],
+            **{f"__date_{i}": qty for i, qty in enumerate(quantities)},
+        })
+
+    internal_dates = [f"__date_{i}" for i in range(len(selected_date_cols))]
+    if not rows:
+        return pd.DataFrame(columns=["품번", "모델", "고객사품번", "합계"])
+    frame = pd.DataFrame(rows)
+
+    def first_nonempty(series):
+        values = series.dropna().astype(str).str.strip()
+        values = values[values != ""]
+        return values.iloc[0] if not values.empty else ""
+
+    aggregation = {"모델": first_nonempty, "고객사품번": first_nonempty}
+    aggregation.update({col: "sum" for col in internal_dates})
+    result = frame.groupby("품번", as_index=False).agg(aggregation)
+    result = result[["품번", "모델", "고객사품번"] + internal_dates]
+    for idx in result.index:
+        result.loc[idx, internal_dates] = adjust_row(result.loc[idx, internal_dates].tolist())
+    result = apply_quantities_by_part_left_to_right(
+        result, actuals, part_col="품번", value_start_idx=3
+    )
+    result["합계"] = result[internal_dates].sum(axis=1)
+    result = result[result["합계"] != 0].reset_index(drop=True)
+
+    labels = []
+    seen = {}
+    for col_idx in selected_date_cols:
+        label = date_values[col_idx].strftime("%Y/%m/%d")
+        seen[label] = seen.get(label, 0) + 1
+        labels.append(label if seen[label] == 1 else f"{label}_{seen[label]}")
+    result = result.rename(columns=dict(zip(internal_dates, labels)))
+    total = {col: "" for col in result.columns}
+    total["품번"] = "합계"
+    for col in labels + ["합계"]:
+        total[col] = result[col].sum()
+    return pd.concat([result, pd.DataFrame([total])], ignore_index=True)
+
+
+def load_actuals_by_process(actual_file):
+    df = pd.read_excel(actual_file)
+    part_col = find_column_by_keywords(df, ("품번",))
+    qty_col = find_column_by_keywords(df, ("실적", "수량"))
+    process_col = find_column_by_keywords(df, ("공정",))
+    if part_col is None or qty_col is None:
+        raise RuntimeError("output.xlsx에 품번/실적수량 열이 없습니다.")
+
+    work = df[[part_col, qty_col] + ([process_col] if process_col else [])].copy()
+    work[part_col] = work[part_col].apply(normalize_part_no)
+    work[qty_col] = pd.to_numeric(work[qty_col], errors="coerce").fillna(0)
+    if process_col:
+        work["__MRP공정"] = work[process_col].apply(classify_process)
+    else:
+        work["__MRP공정"] = "전체"
+    work = work[work[part_col] != ""]
+
+    grouped = {}
+    for process, group in work.groupby("__MRP공정"):
+        grouped[process] = group.groupby(part_col)[qty_col].sum().to_dict()
+    return grouped
+
+
+def classify_process(value):
+    text = normalize_process_token(value)
+    if "CORE" in text:
+        return "CORE"
+    if "TANK" in text or "용접" in text or "CLINCHING" in text:
+        return "TANK"
+    if "완성" in text:
+        return "완성"
+    return "기타"
+
+
+def build_mrp_sheet(extracted, start_date, end_date, actuals):
+    metadata = ["품번", "모델", "고객사품번"]
+    if extracted.empty:
+        return pd.DataFrame(columns=metadata + ["합계"])
+
+    df = extracted.copy()
+    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce").dt.normalize()
+    df["수량"] = pd.to_numeric(df["수량"], errors="coerce").fillna(0)
+    df["품번"] = df["품번"].apply(normalize_part_no)
+
+    plan = df[df["구분"] == "계획"].copy()
+    if start_date is not None:
+        plan = plan[plan["날짜"] >= pd.Timestamp(start_date)]
+    if end_date is not None:
+        plan = plan[plan["날짜"] <= pd.Timestamp(end_date)]
+
+    plan_dates = sorted(plan["날짜"].dropna().unique())
+    if not plan_dates:
+        return pd.DataFrame(columns=metadata + ["합계"])
+
+    # 기준일(기간 시작일)의 미달을 출력의 첫 날짜 열에 포함한다.
+    shortage = df[df["구분"] == "미달"].copy()
+    baseline = pd.Timestamp(start_date) if start_date is not None else pd.Timestamp(plan_dates[0])
+    shortage = shortage[shortage["날짜"] == baseline]
+    if not shortage.empty:
+        shortage["날짜"] = pd.Timestamp(plan_dates[0])
+        plan = pd.concat([plan, shortage], ignore_index=True)
+
+    def first_nonempty(series):
+        values = series.dropna().astype(str).str.strip()
+        values = values[values != ""]
+        return values.iloc[0] if not values.empty else ""
+
+    info = (
+        df.groupby("품번", as_index=False)
+        .agg({"모델": first_nonempty, "고객사품번": first_nonempty})
+    )
+    wide = plan.pivot_table(
+        index="품번", columns="날짜", values="수량", aggfunc="sum", fill_value=0
+    ).reset_index()
+    result = info.merge(wide, on="품번", how="inner")
+    date_cols = sorted(c for c in result.columns if isinstance(c, pd.Timestamp))
+    result = result[metadata + date_cols]
+
+    for idx in result.index:
+        result.loc[idx, date_cols] = adjust_row(result.loc[idx, date_cols].tolist())
+
+    result = apply_quantities_by_part_left_to_right(
+        result,
+        actuals,
+        part_col="품번",
+        value_start_idx=len(metadata),
+    )
+    date_cols = [c for c in result.columns if isinstance(c, pd.Timestamp)]
+    result["합계"] = result[date_cols].sum(axis=1)
+    result = result[result["합계"] != 0].reset_index(drop=True)
+    result = result.rename(columns={c: c.strftime("%Y/%m/%d") for c in date_cols})
+
+    total = {col: "" for col in result.columns}
+    total["품번"] = "합계"
+    for col in [c.strftime("%Y/%m/%d") for c in date_cols] + ["합계"]:
+        total[col] = result[col].sum()
+    return pd.concat([result, pd.DataFrame([total])], ignore_index=True)
+
+
+def _actual_file_path():
+    base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+    return base / "output.xlsx"
+
+
+def write_result(output_path, sheets):
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        for sheet_name, df in sheets.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+    wb = load_workbook(output_path)
+    for ws in wb.worksheets:
+        ws.freeze_panes = "D2"
+        ws.auto_filter.ref = ws.dimensions
+        for cell in ws[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="4472C4")
+        for col in ws.columns:
+            width = min(max(len(str(cell.value or "")) for cell in col) + 2, 24)
+            ws.column_dimensions[col[0].column_letter].width = width
+    wb.save(output_path)
+
+
 def main():
     root = Tk()
     root.withdraw()
     root.attributes("-topmost", True)
 
-    file_path = select_excel_file("엑셀 선택", parent=root)
-
-    if not file_path:
-        root.destroy()
-        return
-
     try:
-        df = pd.read_excel(file_path, header=None)
-
-        # 1️⃣ 날짜 열 찾기
-        date_row_idx, date_cols = find_date_columns(df)
-
-        # 2️⃣ 데이터 시작 행 찾기
-        start_col = min(date_cols)
-        end_col = max(date_cols) + 1
-
-        start_row = find_data_start_row(df, start_col, end_col)
-
-        today_grouped = load_actual_quantities_by_part(OUTPUT_FILE)
-
-        # 날짜 열 앞의 원본 배치: 모델명 → 고객사 품번 → 품번
-        model_col = start_col - 3
-        customer_code_col = start_col - 2
-        product_col = start_col - 1
-
-
-        date_row = df.iloc[date_row_idx, date_cols].tolist()
-        date_row = [
-            format_date_header(d)
-            for d in date_row
-        ]
-        date_internal_cols = [
-            f"__date_{idx}"
-            for idx in range(len(date_row))
-        ]
-
-        processed_rows = []
-
-        # 3️⃣ 처리
-        
-        for i in range(start_row, len(df)):
-            row_full = df.iloc[i]
-
-
-            product = row_full[product_col]
-            model= row_full[model_col]
-            customer_code = row_full[customer_code_col]
-
-            if pd.isna(product):
-                continue
-
-            row = row_full.iloc[date_cols].tolist()
-            row = [pd.to_numeric(x, errors='coerce') for x in row]
-            row = [0 if pd.isna(x) else x for x in row]
-
-            # 같은 품번의 수량을 모두 합산한 뒤 재고 이월을 계산해야 한다.
-            # 여기서 먼저 계산하면 -8 행은 0이 되고 +6 행은 그대로 남는 문제가 생긴다.
-            processed_rows.append([model, customer_code, product] + row)
-
-
-        # 저장
-        # 🔥 DataFrame으로 변환
-        result_df = pd.DataFrame(processed_rows)
-
-        result_df.columns = ["모델", "고객사 품번", "품번"] + date_internal_cols
-
-        result_df.iloc[:, 3:] = result_df.iloc[:, 3:].apply(pd.to_numeric, errors='coerce').fillna(0)
-
-        agg_dict = {"모델": "first", "고객사 품번": lambda x: x.dropna().iloc[0] if not x.dropna().empty else ""}
-
-
-        for col in result_df.columns[3:]:
-            agg_dict[col] = "sum"
-
-        # 🔥 품번 기준 그룹화 + 합계
-        result_df["품번"] = result_df["품번"].astype(str).str.strip()
-        result_df = result_df.groupby("품번", as_index=False).agg(agg_dict)
-        result_df = result_df[
-            ["품번", "모델", "고객사 품번"] + date_internal_cols
-        ]
-
-        # 같은 품번/날짜의 수량을 먼저 상계한 결과로 재고를 미래 계획에 차감한다.
-        # 예: 첫날 -8 + 6 = -2 → 첫날은 0, 재고 2만 다음 날로 이월
-        for idx in result_df.index:
-            grouped_values = result_df.loc[idx, date_internal_cols].tolist()
-            result_df.loc[idx, date_internal_cols] = adjust_row(grouped_values)
-
-        result_df = apply_quantities_by_part_left_to_right(
-            result_df,
-            today_grouped,
-            part_col="품번",
-            value_start_idx=3,
+        plan_file = select_excel_file("생산계획 파일 선택 (완성/TANK)", parent=root)
+        if not plan_file:
+            return
+        core_file = select_excel_file(
+            "기존 데이터 가공 파일 선택 (CORE)", parent=root, initial_path=plan_file
         )
-        result_df = result_df[(result_df.iloc[:, 3:] != 0).any(axis=1)]
+        if not core_file:
+            return
 
-        output_date_cols = []
-        seen_dates = {}
-        for date_label in date_row:
-            seen_dates[date_label] = seen_dates.get(date_label, 0) + 1
-            if seen_dates[date_label] == 1:
-                output_date_cols.append(date_label)
-            else:
-                output_date_cols.append(f"{date_label}_{seen_dates[date_label]}")
+        start_date, end_date = select_date_range(root)
+        output_path = select_excel_save_file("MRP 결과 저장", plan_file, "MRP", parent=root)
+        if not output_path:
+            return
 
-        result_df = result_df.rename(
-            columns=dict(zip(date_internal_cols, output_date_cols))
+        actual_file = _actual_file_path()
+        if not actual_file.exists():
+            raise RuntimeError(f"오늘실적 정규화본을 찾지 못했습니다: {actual_file}")
+        actuals_by_process = load_actuals_by_process(actual_file)
+
+        output_sheets = {}
+        for source_sheet, process, output_sheet in PLAN_SHEETS:
+            actuals = actuals_by_process.get(process, actuals_by_process.get("전체", {}))
+            extracted = extract_mrp_source(plan_file, source_sheet, process)
+            output_sheets[output_sheet] = build_mrp_sheet(
+                extracted, start_date, end_date, actuals
+            )
+
+        # Core 가공본은 시트가 여러 개여도 맨 첫 번째 시트를 최종본으로 사용한다.
+        core_sheet = _first_sheet_name(core_file)
+        core_actuals = actuals_by_process.get("CORE", actuals_by_process.get("전체", {}))
+        output_sheets[CORE_OUTPUT_SHEET] = build_processed_core_sheet(
+            core_file, core_sheet, start_date, end_date, core_actuals
         )
 
-        # 숫자 날짜 컬럼
-        date_columns = result_df.columns[3:]
-
-        # 행 합계 추가
-        result_df["합계"] = result_df[date_columns].sum(axis=1)
-
-        # 열 합계 행 추가
-        total_row = {
-            "모델": "합계",
-            "고객사 품번": "",
-            "품번": ""
-        }
-
-        for col in date_columns:
-            total_row[col] = result_df[col].sum()
-
-        total_row["합계"] = result_df["합계"].sum()
-
-        result_df = pd.concat([result_df, pd.DataFrame([total_row])], ignore_index=True)
-
-        output_path = file_path.replace(".xlsx", "_MRP.xlsx")
-
-        result_df.to_excel(output_path, index=False)
-
-
-        wb = load_workbook(output_path)
-        ws = wb.active
-
-        for col in range(3, len(result_df.columns) + 1):
-            for row in range(1, len(result_df) + 1):  # ⭐ 헤더 포함
-                cell = ws.cell(row=row, column=col)
-                
-                if isinstance(cell.value, datetime):
-                    cell.number_format = 'yyyy-mm-dd'
-
-        wb.save(output_path)
-
-        messagebox.showinfo("완료", f"저장 완료:\n{output_path}")
-
-    except Exception as e:
-        messagebox.showerror("오류", str(e))
+        write_result(output_path, output_sheets)
+        messagebox.showinfo("완료", f"MRP 파일을 저장했습니다.\n{output_path}", parent=root)
+    except Exception as exc:
+        messagebox.showerror("오류", str(exc), parent=root)
     finally:
         root.destroy()
 
