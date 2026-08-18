@@ -2,6 +2,7 @@
 from tkinter import messagebox
 import tkinter as tk
 from tkinter import filedialog
+from pathlib import Path
 import pandas as pd
 from openpyxl import load_workbook
 
@@ -20,6 +21,10 @@ from ExtractPlan import extract_finish_plan_sheet as extract_finish_plan_sheet_f
 # =========================
 SHEET_NAME = FINISH_PLAN_SHEET_NAMES
 EXCLUDE_CUSTOMERS = COA_EXCLUDE_CUSTOMERS
+DEFAULT_MAPPING_FILE = Path(
+    r"\\Data-server\01. 공유문서\08.생산계획\생산계획\MES 생산계획 업로딩용"
+    r"\프로그램\4. 품번매핑.xlsx"
+)
 
 
 def extract_plan_file(plan_file: str, progress=None, extract_stock: bool = False) -> pd.DataFrame:
@@ -372,13 +377,21 @@ def main():
         messagebox.showinfo("알림", "수주 파일을 선택하지 않았습니다.")
         return
 
-    mapping_file = filedialog.askopenfilename(
-        title="품번매핑 파일 선택",
-        filetypes=[("Excel files", "*.xlsx *.xlsm *.xls")],
-    )
-    if not mapping_file:
-        messagebox.showinfo("알림", "품번매핑 파일을 선택하지 않았습니다. 매핑 없이 진행합니다.")
-        mapping_file = None
+    if DEFAULT_MAPPING_FILE.is_file():
+        mapping_file = str(DEFAULT_MAPPING_FILE)
+    else:
+        messagebox.showinfo(
+            "알림",
+            "공용서버 품번매핑 파일에 접근할 수 없습니다.\n"
+            "대신 사용할 품번매핑 파일을 선택해 주세요.",
+        )
+        mapping_file = filedialog.askopenfilename(
+            title="품번매핑 파일 선택",
+            filetypes=[("Excel files", "*.xlsx *.xlsm *.xls")],
+        )
+        if not mapping_file:
+            messagebox.showinfo("알림", "품번매핑 파일을 선택하지 않아 매핑 없이 진행합니다.")
+            mapping_file = None
 
     save_file = select_excel_save_file("결과 파일 저장", plan_file, "COA수주_비교", root)
     if not save_file:

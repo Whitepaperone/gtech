@@ -32,10 +32,3 @@ databases.conf
 .idea/
 Thumbs.db
 desktop.ini
-# Build artifacts
-dist/
-build/
-*.exe
-_internal/
-*.pyc
-__pycache__/
