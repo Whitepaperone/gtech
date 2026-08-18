@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from tkinter import messagebox
 import tkinter as tk
 from tkinter import filedialog
@@ -29,6 +30,7 @@ def extract_plan_file(plan_file: str, progress=None, extract_stock: bool = False
     if progress:
             progress(35, "생산계획 파일 열기 완료")
     frames = []
+    stock_records = []
     total = len(SHEET_NAME)
 
     for i, sheet_name in enumerate(SHEET_NAME, start=1):
@@ -43,6 +45,17 @@ def extract_plan_file(plan_file: str, progress=None, extract_stock: bool = False
         config = {"extract_stock": True, "stock_col": STOCK_COL} if extract_stock else None
         df = extract_finish_plan_sheet_from_module(ws, config=config)
 
+        # 계획이 0인 품번도 재고로 수주를 충당할 수 있으므로 F/AD열은 별도로 읽는다.
+        if extract_stock:
+            for stock_row in ws.iter_rows(
+                min_row=35, min_col=6, max_col=STOCK_COL, values_only=True
+            ):
+                part_value, stock_value = stock_row[0], stock_row[-1]
+                part_no = normalize_part_no(part_value)
+                stock_number = pd.to_numeric(stock_value, errors="coerce")
+                if part_no and pd.notna(stock_number):
+                    stock_records.append({"품번": part_no, "재고": float(stock_number)})
+
         frames.append(df)
 
         if progress:
@@ -53,7 +66,18 @@ def extract_plan_file(plan_file: str, progress=None, extract_stock: bool = False
     if not frames:
         return pd.DataFrame()
 
-    return pd.concat(frames, ignore_index=True)
+    result = pd.concat(frames, ignore_index=True)
+    if extract_stock and stock_records:
+        stock_df = pd.DataFrame(stock_records).groupby("품번", as_index=False)["재고"].max()
+        result = result.drop(columns=["재고"], errors="ignore").merge(stock_df, on="품번", how="left")
+
+        # 생산계획이 전혀 없는 재고 보유 품번도 비교 대상 재고표에 남긴다.
+        missing_stock = stock_df[~stock_df["품번"].isin(result["품번"])].copy()
+        if not missing_stock.empty:
+            missing_stock["날짜"] = pd.NaT
+            missing_stock["계획수량"] = 0.0
+            result = pd.concat([result, missing_stock], ignore_index=True, sort=False)
+    return result
 
 
 # =========================
@@ -64,7 +88,7 @@ def extract_order_file(order_file: str) -> pd.DataFrame:
 
     # COA 내보내기는 보통 A열이 비고 B열부터 헤더가 시작한다. 파일에 제목행이
     # 추가되는 경우도 있으므로 첫 20행에서 필수 헤더가 가장 많이 있는 행을 찾는다.
-    preview = pd.read_excel(order_file, header=None, nrows=20)
+    preview = pd.read_excel(order_file, header=None, nrows=20, engine="calamine")
     best_header_row = 0
     best_match_count = -1
     for row_idx, row in preview.iterrows():
@@ -74,7 +98,7 @@ def extract_order_file(order_file: str) -> pd.DataFrame:
             best_header_row = row_idx
             best_match_count = match_count
 
-    df = pd.read_excel(order_file, header=best_header_row)
+    df = pd.read_excel(order_file, header=best_header_row, engine="calamine")
     df.columns = [normalize_process_token(col) for col in df.columns]
 
     missing = [c for c in required_cols if c not in df.columns]
@@ -120,7 +144,7 @@ def apply_part_mapping(order_df: pd.DataFrame, mapping_file: str = None) -> pd.D
     if not mapping_file:
         return order_df
 
-    map_df = pd.read_excel(mapping_file, header=0)
+    map_df = pd.read_excel(mapping_file, header=0, engine="calamine")
     map_df.columns = [normalize_process_token(c) for c in map_df.columns]
 
     # 매핑표 헤더 표준화
@@ -180,6 +204,17 @@ def compare_order_balance_vs_plan(plan_df: pd.DataFrame, order_df: pd.DataFrame,
     plan_df["날짜"] = pd.to_datetime(plan_df["날짜"], errors="coerce").dt.normalize()
     plan_df["계획수량"] = pd.to_numeric(plan_df["계획수량"], errors="coerce").fillna(0)
 
+    # AD열 재고는 같은 품번의 날짜별 계획 행마다 반복되므로 합산하지 않는다.
+    # 품번별 최댓값을 현재고로 보고, 납기가 빠른 수주부터 한 번씩 차감한다.
+    if "재고" in plan_df.columns:
+        stock_source = plan_df[["품번", "재고"]].copy()
+        stock_source["재고"] = pd.to_numeric(stock_source["재고"], errors="coerce")
+        stock_source = stock_source[stock_source["재고"].notna()]
+        stock_by_part = stock_source.groupby("품번")["재고"].max().clip(lower=0).to_dict()
+    else:
+        stock_by_part = {}
+    stock_remaining = dict(stock_by_part)
+
     plan_df = plan_df[
         (plan_df["품번"] != "") &
         (plan_df["날짜"].notna()) &
@@ -193,7 +228,27 @@ def compare_order_balance_vs_plan(plan_df: pd.DataFrame, order_df: pd.DataFrame,
         order_df["납기"] < plan_start_date
     ].copy()
 
-    past_order_df["판정"] = "계획시작일 이전 납기 / 재고 또는 미출고 확인 필요"
+    past_order_df = past_order_df.sort_values(["비교품번", "납기", "수주번호"], kind="stable")
+    past_rows = []
+    for _, order in past_order_df.iterrows():
+        part_no = order["비교품번"]
+        need_qty = float(order["잔여량"])
+        available_stock = float(stock_remaining.get(part_no, 0))
+        used_stock = min(available_stock, need_qty)
+        stock_remaining[part_no] = available_stock - used_stock
+
+        row = order.to_dict()
+        row.update({
+            "재고": float(stock_by_part.get(part_no, 0)),
+            "반영재고수량": used_stock,
+            "재고잔량": stock_remaining[part_no],
+            "부족수량": max(need_qty - used_stock, 0),
+            "판정": "재고 반영 완료" if used_stock >= need_qty else "계획시작일 이전 납기 / 재고 부족 또는 미출고 확인 필요",
+        })
+        past_rows.append(row)
+    past_order_df = pd.DataFrame(past_rows, columns=[
+        *past_order_df.columns, "재고", "반영재고수량", "재고잔량", "부족수량", "판정"
+    ])
     past_order_df["오늘날짜"] = today
     past_order_df["계획시작일"] = plan_start_date
 
@@ -223,13 +278,16 @@ def compare_order_balance_vs_plan(plan_df: pd.DataFrame, order_df: pd.DataFrame,
 
     results = []
 
-    target_order_df = target_order_df.sort_values(["품번", "납기", "수주번호"])
+    target_order_df = target_order_df.sort_values(["비교품번", "납기", "수주번호"], kind="stable")
 
     for _, order in target_order_df.iterrows():
         part_no = order["비교품번"]
         due_date = order["납기"]
         need_qty = float(order["잔여량"])
-        remain_need = need_qty
+        available_stock = float(stock_remaining.get(part_no, 0))
+        used_stock = min(available_stock, need_qty)
+        stock_remaining[part_no] = available_stock - used_stock
+        remain_need = need_qty - used_stock
 
         matched_plan_qty = 0.0
         matched_plan_dates = []
@@ -257,16 +315,23 @@ def compare_order_balance_vs_plan(plan_df: pd.DataFrame, order_df: pd.DataFrame,
 
         shortage_qty = max(remain_need, 0)
 
-        if matched_plan_qty == 0:
+        if shortage_qty == 0 and used_stock >= need_qty:
+            judgment = "재고 반영 완료"
+        elif shortage_qty == 0 and used_stock > 0:
+            judgment = "재고+계획 반영 완료"
+        elif matched_plan_qty == 0 and used_stock == 0:
             judgment = "계획 없음"
         elif shortage_qty > 0:
-            judgment = "계획 부족"
+            judgment = "재고+계획 부족" if used_stock > 0 else "계획 부족"
         else:
             judgment = "반영 완료"
 
         row = order.to_dict()
         row.update({
             "확인종료일": horizon_end,
+            "재고": float(stock_by_part.get(part_no, 0)),
+            "반영재고수량": used_stock,
+            "재고잔량": stock_remaining[part_no],
             "납기전_반영계획수량": matched_plan_qty,
             "부족수량": shortage_qty,
             "반영계획일자": ", ".join(matched_plan_dates),
@@ -333,7 +398,7 @@ def main():
         mapped_count = order_df["품번매핑여부"].eq("Y").sum()
         progress(30, f"품번 매핑 적용 완료: {mapped_count}건 변경")
 
-        plan_df = extract_plan_file(plan_file, progress=progress)
+        plan_df = extract_plan_file(plan_file, progress=progress, extract_stock=True)
 
         progress(92, "수주잔량과 생산계획 비교 중...")
         compare_df, past_order_df, future_order_df, remain_plan_df = compare_order_balance_vs_plan(
