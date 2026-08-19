@@ -13,7 +13,10 @@ from CommonUtils import (
     normalize_process_token,
     select_excel_save_file,
 )
-from ExtractPlan import extract_finish_plan_sheet as extract_finish_plan_sheet_from_module
+from ExtractPlan import (
+    extract_finish_plan_sheet as extract_finish_plan_sheet_from_module,
+    extract_yesterday_shortage_sheet,
+)
 
 
 # =========================
@@ -25,6 +28,15 @@ DEFAULT_MAPPING_FILE = Path(
     r"\\Data-server\01. 공유문서\08.생산계획\생산계획\MES 생산계획 업로딩용"
     r"\프로그램\4. 품번매핑.xlsx"
 )
+
+
+def is_due_date_ignored_order(row) -> bool:
+    """지정 고객 조건에 따라 납기 제한 없이 계획을 비교할지 판별한다."""
+    customer = normalize_process_token(row.get("출고(고객)사", ""))
+    remark = normalize_process_token(row.get("비고", ""))
+    if customer.upper() == "MESA":
+        return True
+    return customer == "뉴라텍" and remark.startswith(("현대에버다임", "하나티이씨"))
 
 
 def extract_plan_file(plan_file: str, progress=None, extract_stock: bool = False) -> pd.DataFrame:
@@ -49,6 +61,22 @@ def extract_plan_file(plan_file: str, progress=None, extract_stock: bool = False
         ws = wb[sheet_name]
         config = {"extract_stock": True, "stock_col": STOCK_COL} if extract_stock else None
         df = extract_finish_plan_sheet_from_module(ws, config=config)
+        yesterday_shortage_df = extract_yesterday_shortage_sheet(ws, config=config)
+        if not yesterday_shortage_df.empty:
+            # 음수 미달은 선생산되어 AD열 재고에 이미 반영된 수량이므로
+            # COA의 가용 생산계획에는 다시 넣지 않는다.
+            yesterday_shortage_df = yesterday_shortage_df[
+                pd.to_numeric(yesterday_shortage_df["계획수량"], errors="coerce").fillna(0) > 0
+            ].copy()
+            df = pd.concat([df, yesterday_shortage_df], ignore_index=True, sort=False)
+
+        # 일반 계획은 오늘부터 마지막 계획일까지 모두 사용한다. 어제 미달분은
+        # 별도 이월 계획이므로 위에서 선별한 양수 행만 그대로 유지한다.
+        if not df.empty:
+            plan_dates = pd.to_datetime(df["날짜"], errors="coerce").dt.normalize()
+            kinds = df["구분"].apply(normalize_process_token)
+            today = pd.Timestamp.today().normalize()
+            df = df[(kinds != "계획") | (plan_dates >= today)].copy()
 
         # 계획이 0인 품번도 재고로 수주를 충당할 수 있으므로 F/AD열은 별도로 읽는다.
         if extract_stock:
@@ -130,7 +158,8 @@ def extract_order_file(order_file: str) -> pd.DataFrame:
 
     df = df[df["잔여량"] > 0].copy()
     df = df[df["품번"] != ""].copy()
-    df = df[df["납기"].notna()].copy()
+    ignore_due_date = df.apply(is_due_date_ignored_order, axis=1)
+    df = df[df["납기"].notna() | ignore_due_date].copy()
 
     return df
 
@@ -143,7 +172,9 @@ def apply_part_mapping(order_df: pd.DataFrame, mapping_file: str = None) -> pd.D
 
     # 수주 원본 품번 보존
     order_df["수주품번"] = order_df["품번"]
-    order_df["비교품번"] = order_df["품번"]
+    # 수주 품번 끝의 -AS는 매핑/계획 품번 비교에서만 제외한다.
+    mapping_keys = order_df["수주품번"].str.replace(r"-AS$", "", regex=True, case=False)
+    order_df["비교품번"] = mapping_keys
     order_df["품번매핑여부"] = "N"
 
     if not mapping_file:
@@ -180,12 +211,10 @@ def apply_part_mapping(order_df: pd.DataFrame, mapping_file: str = None) -> pd.D
 
     mapping_dict = dict(zip(map_df["수주품번"], map_df["비교품번"]))
 
-    order_df["비교품번"] = order_df["수주품번"].map(mapping_dict).fillna(order_df["수주품번"])
+    mapped_parts = mapping_keys.map(mapping_dict)
+    order_df["비교품번"] = mapped_parts.fillna(mapping_keys)
 
-    order_df["품번매핑여부"] = order_df.apply(
-        lambda r: "Y" if r["비교품번"] != r["수주품번"] else "N",
-        axis=1
-    )
+    order_df["품번매핑여부"] = mapped_parts.notna().map({True: "Y", False: "N"})
 
     return order_df
 
@@ -227,10 +256,11 @@ def compare_order_balance_vs_plan(plan_df: pd.DataFrame, order_df: pd.DataFrame,
     ].copy()
 
     plan_start_date = plan_df["날짜"].min()
+    order_df["납기무관비교"] = order_df.apply(is_due_date_ignored_order, axis=1)
 
     # 1) 과거 납기 잔량
     past_order_df = order_df[
-        order_df["납기"] < plan_start_date
+        (~order_df["납기무관비교"]) & (order_df["납기"] < plan_start_date)
     ].copy()
 
     past_order_df = past_order_df.sort_values(["비교품번", "납기", "수주번호"], kind="stable")
@@ -259,7 +289,7 @@ def compare_order_balance_vs_plan(plan_df: pd.DataFrame, order_df: pd.DataFrame,
 
     # 2) 장기 납기 잔량
     future_order_df = order_df[
-        order_df["납기"] > horizon_end
+        (~order_df["납기무관비교"]) & (order_df["납기"] > horizon_end)
     ].copy()
 
     future_order_df["판정"] = f"{horizon_weeks}주 이후 납기 / 확인 제외"
@@ -268,8 +298,11 @@ def compare_order_balance_vs_plan(plan_df: pd.DataFrame, order_df: pd.DataFrame,
 
     # 3) 실제 비교 대상: 오늘 ~ 오늘+6주
     target_order_df = order_df[
-        (order_df["납기"] >= plan_start_date) &
-        (order_df["납기"] <= horizon_end)
+        order_df["납기무관비교"] |
+        (
+            (order_df["납기"] >= plan_start_date) &
+            (order_df["납기"] <= horizon_end)
+        )
     ].copy()
 
     plan_group = (
@@ -288,6 +321,7 @@ def compare_order_balance_vs_plan(plan_df: pd.DataFrame, order_df: pd.DataFrame,
     for _, order in target_order_df.iterrows():
         part_no = order["비교품번"]
         due_date = order["납기"]
+        ignore_due_date = bool(order["납기무관비교"])
         need_qty = float(order["잔여량"])
         available_stock = float(stock_remaining.get(part_no, 0))
         used_stock = min(available_stock, need_qty)
@@ -297,9 +331,12 @@ def compare_order_balance_vs_plan(plan_df: pd.DataFrame, order_df: pd.DataFrame,
         matched_plan_qty = 0.0
         matched_plan_dates = []
 
+        plan_date_mask = pd.Series(True, index=plan_group.index) if ignore_due_date else (
+            plan_group["날짜"] <= due_date
+        )
         candidate_idx = plan_group[
             (plan_group["품번"] == part_no) &
-            (plan_group["날짜"] <= due_date) &
+            plan_date_mask &
             (plan_group["계획잔량"] > 0)
         ].index
 

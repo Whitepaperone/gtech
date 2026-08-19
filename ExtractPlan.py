@@ -185,6 +185,20 @@ def build_plan_date_columns(ws) -> List[Dict]:
     return cols
 
 
+def build_yesterday_shortage_columns(ws, today=None) -> List[Dict]:
+    """실행일 기준 어제 날짜의 '미달' 열만 반환한다.
+
+    생산계획에는 같은 미달 수량이 여러 날짜에 이월 기재되므로 과거 미달을
+    누적하지 않고 가장 최신값인 어제 미달만 사용한다.
+    """
+    base_date = pd.Timestamp(today).normalize() if today is not None else pd.Timestamp.today().normalize()
+    yesterday = base_date - pd.Timedelta(days=1)
+    return [
+        dc for dc in build_mes_date_columns(ws)
+        if dc["kind"] == "미달" and dc["date"] == yesterday
+    ]
+
+
 def get_sheet_columns(ws) -> Dict[str, Optional[int]]:
     cols = build_header_lookup(ws)
     if not cols["finish_part_col"]:
@@ -245,6 +259,19 @@ def extract_finish_plan_sheet(ws, config: Optional[Dict] = None) -> pd.DataFrame
     호출별 설정을 넘길 수 있다.
     """
     return _extract_plan_sheet(ws, mode="finish", config=config)
+
+
+def extract_yesterday_shortage_sheet(ws, config: Optional[Dict] = None, today=None) -> pd.DataFrame:
+    """완성공정에서 중복 이월분을 제외한 어제 미달 수량만 추출한다."""
+    date_columns = build_yesterday_shortage_columns(ws, today=today)
+    if not date_columns:
+        return pd.DataFrame()
+    return _extract_plan_sheet(
+        ws,
+        mode="finish",
+        config=config,
+        date_columns=date_columns,
+    )
 
 
 def build_mes_date_columns(ws) -> List[Dict]:
@@ -571,11 +598,20 @@ def build_work_order_upload_df(plan_df: pd.DataFrame) -> pd.DataFrame:
     return wide.reset_index(drop=True)
 
 
-def _extract_plan_sheet(ws, mode: str, config: Optional[Dict] = None, check_red_font: bool = False, progress=None) -> pd.DataFrame:
+def _extract_plan_sheet(
+    ws,
+    mode: str,
+    config: Optional[Dict] = None,
+    check_red_font: bool = False,
+    progress=None,
+    date_columns: Optional[List[Dict]] = None,
+) -> pd.DataFrame:
     is_mes = mode == "mes"
     config = config or {}
     merged_map = build_merged_map(ws)
-    date_cols = build_mes_date_columns(ws) if is_mes else build_plan_date_columns(ws)
+    date_cols = date_columns if date_columns is not None else (
+        build_mes_date_columns(ws) if is_mes else build_plan_date_columns(ws)
+    )
 
     if not date_cols:
         raise RuntimeError(f"{ws.title}: 날짜/구분 컬럼을 찾지 못했습니다.")
@@ -806,19 +842,11 @@ def extract_core_tube_from_ws(ws, asof_date=None, start_date=None, end_date=None
     if start_col is None:
         raise RuntimeError(f"{ws.title}: 날짜 시작 열을 찾지 못했습니다.")
 
-    # 계획 열과 사용자가 선택한 날짜의 미달 열을 함께 읽는다.
+    # 계획 열과 최신 이월값인 어제 미달 열만 함께 읽는다.
     # 미달은 계획 수량과 섞지 않고 아래에서 별도로 집계한다.
     asof_calc = asof_date or (start_date if start_date is not None else None)
-    selected_date = pd.to_datetime(asof_calc).normalize() if asof_calc is not None else None
-    date_cols = [
-        dc for dc in build_mes_date_columns(ws)
-        if dc["kind"] == "계획"
-        or (
-            selected_date is not None
-            and dc["kind"] == "미달"
-            and dc["date"] == selected_date
-        )
-    ]
+    date_cols = [dc for dc in build_mes_date_columns(ws) if dc["kind"] == "계획"]
+    date_cols.extend(build_yesterday_shortage_columns(ws))
     if not date_cols:
         raise RuntimeError(f"{ws.title}: 날짜 컬럼을 찾지 못했습니다.")
 
