@@ -1,8 +1,6 @@
 from pathlib import Path
 import sys
 from tkinter import Tk, messagebox
-from datetime import date, datetime
-
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
@@ -23,8 +21,8 @@ from ExtractPlan import extract_plan_sheet, load_calamine_worksheets
 PLAN_SHEETS = (
     ("완성공정(실적)", "완성", "완성시트"),
     ("TANK공정(실적)", "TANK", "TANK공정시트"),
+    ("CORE공정(실적)", "CORE", "CORE공정시트"),
 )
-CORE_OUTPUT_SHEET = "CORE공정시트"
 
 
 def adjust_row(values):
@@ -44,137 +42,12 @@ def adjust_row(values):
     return result
 
 
-def _first_sheet_name(file_path):
-    with pd.ExcelFile(file_path, engine="calamine") as excel_file:
-        if not excel_file.sheet_names:
-            raise RuntimeError(f"{Path(file_path).name}: 시트가 없습니다.")
-        return excel_file.sheet_names[0]
-
-
 def extract_mrp_source(file_path, sheet_name, default_process, **config_overrides):
     worksheets = load_calamine_worksheets(file_path, [sheet_name])
     if sheet_name not in worksheets:
         raise RuntimeError(f"{Path(file_path).name}: {sheet_name} 시트가 없습니다.")
     config = {"default_process": default_process, **config_overrides}
     return extract_plan_sheet(worksheets[sheet_name], config)
-
-
-def _as_date(value):
-    if isinstance(value, (datetime, date, pd.Timestamp)):
-        return pd.to_datetime(value, errors="coerce").normalize()
-    if isinstance(value, (int, float)) and value > 20000:
-        return pd.to_datetime(value, unit="D", origin="1899-12-30", errors="coerce").normalize()
-    if isinstance(value, str) and ("/" in value or "-" in value):
-        return pd.to_datetime(value.strip(), errors="coerce").normalize()
-    return pd.NaT
-
-
-def build_processed_core_sheet(file_path, sheet_name, start_date, end_date, actuals):
-    """기존 MRP 가공 형식의 Core 시트를 읽는다.
-
-    가공본의 첫 날짜 열은 기준일 미달이므로 기간과 무관하게 보존한다.
-    나머지 날짜 열에만 사용자가 선택한 기간을 적용한다.
-    """
-    raw = pd.read_excel(
-        file_path, sheet_name=sheet_name, header=None, engine="calamine"
-    )
-    date_row_idx = None
-    all_date_cols = []
-    date_values = {}
-    for row_idx in range(min(10, len(raw))):
-        found = []
-        for col_idx, value in enumerate(raw.iloc[row_idx]):
-            parsed = _as_date(value)
-            if not pd.isna(parsed):
-                found.append(col_idx)
-                date_values[col_idx] = parsed
-        if found:
-            date_row_idx, all_date_cols = row_idx, found
-            break
-    if date_row_idx is None:
-        raise RuntimeError(f"{sheet_name}: 날짜 헤더를 찾지 못했습니다.")
-
-    shortage_col = all_date_cols[0]
-    selected_date_cols = [shortage_col]
-    for col_idx in all_date_cols[1:]:
-        day = date_values[col_idx]
-        if start_date is not None and day < pd.Timestamp(start_date):
-            continue
-        if end_date is not None and day > pd.Timestamp(end_date):
-            continue
-        selected_date_cols.append(col_idx)
-
-    if len(selected_date_cols) == 1:
-        raise RuntimeError(f"{sheet_name}: 선택 기간에 해당하는 계획 날짜가 없습니다.")
-
-    start_col = min(all_date_cols)
-    header_rows = raw.iloc[: date_row_idx + 1]
-
-    def find_metadata_col(keywords, fallback):
-        for col_idx in range(start_col):
-            text = " ".join(str(v) for v in header_rows.iloc[:, col_idx] if not pd.isna(v))
-            normalized = normalize_process_token(text)
-            if all(normalize_process_token(k) in normalized for k in keywords):
-                return col_idx
-        return fallback
-
-    model_col = find_metadata_col(("모델",), start_col - 3)
-    customer_col = find_metadata_col(("고객", "품번"), start_col - 2)
-    part_col = find_metadata_col(("품번",), start_col - 1)
-    # 고객사 품번이 먼저 발견되는 경우 품번은 날짜 바로 앞 열을 우선한다.
-    if part_col == customer_col:
-        part_col = start_col - 1
-
-    rows = []
-    for row_idx in range(date_row_idx + 1, len(raw)):
-        part_no = normalize_part_no(raw.iat[row_idx, part_col])
-        if not part_no:
-            continue
-        quantities = [pd.to_numeric(raw.iat[row_idx, c], errors="coerce") for c in selected_date_cols]
-        quantities = [0.0 if pd.isna(v) else float(v) for v in quantities]
-        if not any(quantities):
-            continue
-        rows.append({
-            "품번": part_no,
-            "모델": raw.iat[row_idx, model_col],
-            "고객사품번": raw.iat[row_idx, customer_col],
-            **{f"__date_{i}": qty for i, qty in enumerate(quantities)},
-        })
-
-    internal_dates = [f"__date_{i}" for i in range(len(selected_date_cols))]
-    if not rows:
-        return pd.DataFrame(columns=["품번", "모델", "고객사품번", "합계"])
-    frame = pd.DataFrame(rows)
-
-    def first_nonempty(series):
-        values = series.dropna().astype(str).str.strip()
-        values = values[values != ""]
-        return values.iloc[0] if not values.empty else ""
-
-    aggregation = {"모델": first_nonempty, "고객사품번": first_nonempty}
-    aggregation.update({col: "sum" for col in internal_dates})
-    result = frame.groupby("품번", as_index=False, sort=False).agg(aggregation)
-    result = result[["품번", "모델", "고객사품번"] + internal_dates]
-    for idx in result.index:
-        result.loc[idx, internal_dates] = adjust_row(result.loc[idx, internal_dates].tolist())
-    result = apply_quantities_by_part_left_to_right(
-        result, actuals, part_col="품번", value_start_idx=3
-    )
-    result["합계"] = result[internal_dates].sum(axis=1)
-    result = result[result["합계"] != 0].reset_index(drop=True)
-
-    labels = []
-    seen = {}
-    for col_idx in selected_date_cols:
-        label = date_values[col_idx].strftime("%Y/%m/%d")
-        seen[label] = seen.get(label, 0) + 1
-        labels.append(label if seen[label] == 1 else f"{label}_{seen[label]}")
-    result = result.rename(columns=dict(zip(internal_dates, labels)))
-    total = {col: "" for col in result.columns}
-    total["품번"] = "합계"
-    for col in labels + ["합계"]:
-        total[col] = result[col].sum()
-    return pd.concat([result, pd.DataFrame([total])], ignore_index=True)
 
 
 def load_actuals_by_process(actual_file):
@@ -278,7 +151,7 @@ def build_mrp_sheet(extracted, start_date, end_date, actuals):
 
 
 def build_calculation_trace(extracted, start_date, end_date, actuals, output_sheet):
-    """완성/TANK 계산 과정을 품번·날짜별로 펼쳐서 보여준다."""
+    """공정별 계산 과정을 품번·날짜별로 펼쳐서 보여준다."""
     columns = [
         "결과시트", "품번", "모델", "고객사품번", "날짜",
         "계획수량", "기준일미달", "미달합산후수량", "선생산반영후수량",
@@ -414,13 +287,8 @@ def main():
     root.attributes("-topmost", True)
 
     try:
-        plan_file = select_excel_file("생산계획 파일 선택 (완성/TANK)", parent=root)
+        plan_file = select_excel_file("생산계획 파일 선택 (완성/TANK/CORE)", parent=root)
         if not plan_file:
-            return
-        core_file = select_excel_file(
-            "기존 데이터 가공 파일 선택 (CORE)", parent=root, initial_path=plan_file
-        )
-        if not core_file:
             return
 
         finish_start_date, finish_end_date = select_date_range(
@@ -428,6 +296,9 @@ def main():
         )
         tank_start_date, tank_end_date = select_date_range(
             root, title="TANK공정 추출 기간 선택"
+        )
+        core_start_date, core_end_date = select_date_range(
+            root, title="CORE공정 추출 기간 선택"
         )
         output_path = select_excel_save_file("MRP 결과 저장", plan_file, "MRP", parent=root)
         if not output_path:
@@ -445,8 +316,10 @@ def main():
             extract_options = {"include_accessory": False} if process == "완성" else {}
             if process == "완성":
                 start_date, end_date = finish_start_date, finish_end_date
-            else:
+            elif process == "TANK":
                 start_date, end_date = tank_start_date, tank_end_date
+            else:
+                start_date, end_date = core_start_date, core_end_date
             extracted = extract_mrp_source(
                 plan_file, source_sheet, process, **extract_options
             )
@@ -459,12 +332,6 @@ def main():
                 )
             )
 
-        # Core 가공본은 시트가 여러 개여도 맨 첫 번째 시트를 최종본으로 사용한다.
-        core_sheet = _first_sheet_name(core_file)
-        core_actuals = actuals_by_process.get("CORE", actuals_by_process.get("전체", {}))
-        output_sheets[CORE_OUTPUT_SHEET] = build_processed_core_sheet(
-            core_file, core_sheet, None, None, core_actuals
-        )
         output_sheets["계산추적"] = pd.concat(trace_frames, ignore_index=True)
 
         write_result(output_path, output_sheets)

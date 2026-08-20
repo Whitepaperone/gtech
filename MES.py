@@ -3,7 +3,6 @@ import tkinter as tk
 from tkinter import messagebox
 
 import pandas as pd
-from openpyxl import load_workbook
 
 from AppConstants import MES_OUTPUT_FILE, MES_SHEET_CONFIG, WORKSHOP_TO_PROCESS
 from CommonUtils import (
@@ -16,7 +15,6 @@ from ExtractPlan import load_calamine_worksheets
 
 OUTPUT_FILE = MES_OUTPUT_FILE
 SHEET_CONFIG = MES_SHEET_CONFIG
-CHECK_RED_FONT = False
 
 
 def canonical_workshop_name(name: str) -> str:
@@ -30,11 +28,7 @@ def map_process_from_workshop(name: str) -> Optional[str]:
 
 
 def extract_plan_all(plan_file: str, progress=None) -> pd.DataFrame:
-    if CHECK_RED_FONT:
-        wb = load_workbook(plan_file, data_only=True)
-        worksheets = {name: wb[name] for name in wb.sheetnames}
-    else:
-        worksheets = load_calamine_worksheets(plan_file, SHEET_CONFIG.keys())
+    worksheets = load_calamine_worksheets(plan_file, SHEET_CONFIG.keys())
 
     frames = []
     total = max(len(SHEET_CONFIG), 1)
@@ -46,7 +40,7 @@ def extract_plan_all(plan_file: str, progress=None) -> pd.DataFrame:
         if progress:
             progress(20 + int((i - 1) / total * 25), f"{sheet_name} 데이터 추출 중...")
         frame = extract_plan_sheet_from_module(
-            worksheets[sheet_name], config, check_red_font=CHECK_RED_FONT,
+            worksheets[sheet_name], config, check_red_font=False,
             progress=lambda pct, text, i=i: progress(
                 20 + int(((i - 1) + pct / 100) / total * 25), text
             ) if progress else None,
@@ -506,13 +500,6 @@ def main():
         return
 
     start_date, end_date = select_date_range(root)
-    global CHECK_RED_FONT
-    CHECK_RED_FONT = messagebox.askyesno(
-        "빨간 글씨 체크 제외",
-        "계획표에서 빨간 글씨로 표시된 셀을 제외하시겠습니까?\n"
-        "(수락하면 빨간 글씨는 수량 계산에서 제외됩니다)",
-    )
-
     progress_win, progress = create_progress_window(root, "MES 데이터 정규화 진행")
     try:
         progress(20, "생산계획 정규화 중...")
