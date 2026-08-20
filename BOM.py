@@ -31,10 +31,6 @@ HIGHLIGHT_CHILD = "child"
 # 파일 선택
 # =========================
 
-from openpyxl import load_workbook
-
-
-
 def select_file(title, parent):
     return filedialog.askopenfilename(
         parent=parent,
@@ -57,7 +53,7 @@ def read_plan_file(plan_file):
         header=None,
         usecols=[5, 52],   # F, BA
         skiprows=35,
-        engine="openpyxl"
+        engine="calamine"
     )
 
     df.columns = ["품번", "계획수량"]
@@ -262,7 +258,7 @@ def main():
         # =========================
 
         progress(5, "BOM 기준 재고 현황 읽는 중...")
-        bom_df = pd.read_excel(bom_file)
+        bom_df = pd.read_excel(bom_file, engine="calamine")
         bom_df["품번정리"] = bom_df[BOM_PART_COL].apply(clean_part_no)
 
         # =========================
@@ -270,7 +266,7 @@ def main():
         # =========================
 
         progress(20, "재고실사조정 파일 읽는 중...")
-        adj_df = pd.read_excel(adj_file)
+        adj_df = pd.read_excel(adj_file, engine="calamine")
         adj_df["품번정리"] = adj_df[ADJ_PART_COL].apply(clean_part_no)
 
         progress(32, "재공 수량 집계 중...")
@@ -293,7 +289,7 @@ def main():
         # =========================
 
         progress(45, "협력사 정보 읽는 중...")
-        sup_df = pd.read_excel(supplier_file)
+        sup_df = pd.read_excel(supplier_file, engine="calamine")
         sup_df["품번정리"] = sup_df[SUP_PART_COL].apply(clean_part_no)
 
         progress(55, "협력사 정보 병합 중...")

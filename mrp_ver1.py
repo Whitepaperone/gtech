@@ -134,7 +134,7 @@ def main():
         return
 
     try:
-        df = pd.read_excel(file_path, header=None)
+        df = pd.read_excel(file_path, header=None, engine="calamine")
 
         # 1️⃣ 날짜 열 찾기
         date_row_idx, date_cols = find_date_columns(df)
@@ -282,4 +282,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

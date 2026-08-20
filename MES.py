@@ -1,90 +1,28 @@
 from typing import Optional
 import tkinter as tk
-from tkinter import filedialog, messagebox
-from tkcalendar import Calendar
+from tkinter import messagebox
 
 import pandas as pd
 from openpyxl import load_workbook
 
-from AppConstants import (
-    FINAL_COMPARE_COLUMNS,
-    MES_OUTPUT_FILE,
-    MES_SHEET_CONFIG,
-    WORKSHOP_TO_PROCESS,
-)
+from AppConstants import MES_OUTPUT_FILE, MES_SHEET_CONFIG, WORKSHOP_TO_PROCESS
 from CommonUtils import (
-    create_progress_window,
-    filter_by_period,
-    normalize_part_no,
-    normalize_process_token,
-    safe_float,
-    select_excel_file,
-    select_date_range,
+    create_progress_window, filter_by_period, normalize_part_no,
+    normalize_process_token, select_date_range, select_excel_file,
 )
-from ExtractPlan import (
-    extract_plan_sheet as extract_plan_sheet_from_module,
-    load_calamine_worksheets,
-)
+from ExtractPlan import extract_plan_sheet as extract_plan_sheet_from_module
+from ExtractPlan import load_calamine_worksheets
 
-# =========================
-# 상수
-# =========================
+
 OUTPUT_FILE = MES_OUTPUT_FILE
 SHEET_CONFIG = MES_SHEET_CONFIG
-
-# =========================
-# 공통 유틸
-# =========================
+CHECK_RED_FONT = False
 
 
-
-def make_compare_key(process: str, workshop: str, team: str, part_no: str, day) -> str:
-    """
-    액세서리는 작업장명/작업반명/공정인쇄 차이로 비교가 자주 틀어지므로
-    완성 + 출하-액세서리 는 공정 + 품번 + 날짜만으로 비교한다.
-    나머지는 기존처럼 공정 + 작업장명 + 작업반명 + 품번 + 날짜 사용.
-    """
-    process = normalize_process_token(process)
-    workshop = normalize_process_token(workshop)
-    team = normalize_process_token(team)
-    part_no = normalize_part_no(part_no)
-    day = pd.to_datetime(day, errors="coerce").normalize()
-
-    if process == "완성" and workshop == "출하-액세서리":
-        return f"{process}|{part_no}|{day}"
-
-    return f"{process}|{workshop}|{team}|{part_no}|{day}"
-
-
-def normalize_today_actual_process(v: str) -> Optional[str]:
-    t = normalize_process_token(v).replace(" ", "").upper()
-
-    if t in ("완성조립", "완성"):
-        return "완성"
-    if t in ("TANK조립", "TANK", "용접"):
-        return "TANK"
-    if t in ("CORE조립", "CORE"):
-        return "CORE"
-
-    return None
-
-def make_fifo_group_key(process: str, workshop: str, team: str, part_no: str) -> str:
-    process = normalize_process_token(process)
-    workshop = canonical_workshop_name(workshop)
-    team = normalize_process_token(team)
-    part_no = normalize_part_no(part_no)
-
-    # 액세서리는 작업반 제외
-    if process == "완성" and workshop == "출하-액세서리":
-        return f"{process}|{part_no}"
-
-    return f"{process}|{workshop}|{team}|{part_no}"
 def canonical_workshop_name(name: str) -> str:
-    return (
-        normalize_process_token(name)
-        .replace("악세서리", "액세서리")
-        .replace("액세사리", "액세서리")
-    )
+    return (normalize_process_token(name)
+            .replace("악세서리", "액세서리")
+            .replace("액세사리", "액세서리"))
 
 
 def map_process_from_workshop(name: str) -> Optional[str]:
@@ -97,973 +35,511 @@ def extract_plan_all(plan_file: str, progress=None) -> pd.DataFrame:
         worksheets = {name: wb[name] for name in wb.sheetnames}
     else:
         worksheets = load_calamine_worksheets(plan_file, SHEET_CONFIG.keys())
-    frames = []
-    total = len(SHEET_CONFIG)
 
+    frames = []
+    total = max(len(SHEET_CONFIG), 1)
     for i, (sheet_name, config) in enumerate(SHEET_CONFIG.items(), start=1):
         if sheet_name not in worksheets:
             if progress:
                 progress(20 + int(i / total * 25), f"{sheet_name} 시트 없음, 건너뜀")
             continue
-
         if progress:
-            progress(20 + int((i - 1) / total * 25), f"{sheet_name} 계획 추출 중...")
-
-        ws = worksheets[sheet_name]
-        df_sheet = extract_plan_sheet_from_module(
-            ws,
-            config,
-            check_red_font=CHECK_RED_FONT,
-            progress=lambda pct, text, i=i, total=total: progress(
-                20 + int(((i - 1) + pct / 100) / total * 25),
-                text,
+            progress(20 + int((i - 1) / total * 25), f"{sheet_name} 데이터 추출 중...")
+        frame = extract_plan_sheet_from_module(
+            worksheets[sheet_name], config, check_red_font=CHECK_RED_FONT,
+            progress=lambda pct, text, i=i: progress(
+                20 + int(((i - 1) + pct / 100) / total * 25), text
             ) if progress else None,
         )
-        if progress:
-            progress(20 + int(i / total * 25), f"{sheet_name} 계획 추출 완료: {len(df_sheet)}건")
-        frames.append(df_sheet)
-
-    if not frames:
-        return pd.DataFrame()
-
-    return pd.concat(frames, ignore_index=True)
+        if not frame.empty:
+            frames.append(frame)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-# =========================
-# MES 정규화
-# =========================
 def extract_mes(mes_file: str) -> pd.DataFrame:
+    """MES 작업지시 원본을 흐름 계산 없이 정규화한다."""
     df = pd.read_excel(mes_file, sheet_name="Sheet")
-
     needed = ["계획일", "작업장명", "작업반명", "작업지시상태", "품번", "지시량", "실적량"]
-    missing = [c for c in needed if c not in df.columns]
+    missing = [column for column in needed if column not in df.columns]
     if missing:
         raise RuntimeError(f"MES 파일에 필요한 컬럼이 없습니다: {missing}")
 
     df = df[needed].copy()
     df["작업장명"] = df["작업장명"].fillna("").astype(str).str.strip()
     df["작업반명"] = df["작업반명"].fillna("").astype(str).str.strip()
-
-    workshop_for_compare = df["작업장명"].map(canonical_workshop_name)
-    df["공정"] = workshop_for_compare.map(map_process_from_workshop)
-
-    # 악세서리 계열 통일
-    accessory_mask = workshop_for_compare.astype(str).str.contains("액세서리", na=False)
-    workshop_for_compare = workshop_for_compare.mask(accessory_mask, "출하-액세서리")
-    team_for_compare = df["작업반명"].mask(accessory_mask, "출하-액세서리")
-
-    df = df[df["공정"].notna()].copy()
-    workshop_for_compare = workshop_for_compare.loc[df.index]
-    team_for_compare = team_for_compare.loc[df.index]
-    df = df[df["작업지시상태"] != "종료"].copy()
-    workshop_for_compare = workshop_for_compare.loc[df.index]
-    team_for_compare = team_for_compare.loc[df.index]
-
+    df["공정"] = df["작업장명"].map(canonical_workshop_name).map(map_process_from_workshop)
+    df = df[df["공정"].notna() & (df["작업지시상태"] != "종료")].copy()
     df["날짜"] = pd.to_datetime(df["계획일"], errors="coerce").dt.normalize()
     df["지시량"] = pd.to_numeric(df["지시량"], errors="coerce").fillna(0)
     df["실적량"] = pd.to_numeric(df["실적량"], errors="coerce").fillna(0)
     df["품번"] = df["품번"].apply(normalize_part_no)
+    return (df.groupby(["공정", "작업장명", "작업반명", "품번", "날짜"], as_index=False)
+              .agg({"지시량": "sum", "실적량": "sum"})
+              .sort_values(["공정", "작업장명", "작업반명", "품번", "날짜"])
+              .reset_index(drop=True))
 
-    df["비교키"] = [
-        make_compare_key(process, workshop, team, part_no, day)
-        for process, workshop, team, part_no, day in zip(
-            df["공정"],
-            workshop_for_compare,
-            team_for_compare,
-            df["품번"],
-            df["날짜"],
-        )
+
+def compare_shortage_actual_flow(
+    plan_df: pd.DataFrame,
+    mes_df: pd.DataFrame,
+    today=None,
+    target_keys=None,
+) -> pd.DataFrame:
+    """오늘 미달과 MES 작업지시/실적 흐름을 품번별로 비교한다.
+
+    양수 미달은 오늘까지 남아 있는 MES 작업지시 잔량과 비교한다.
+    음수 미달은 오늘 이후 계획을 가까운 날짜부터 선실적으로 소진한 결과가
+    MES에 동일하게 반영되었는지 검사한다.
+    """
+    result_columns = [
+        "공정", "작업장명", "작업반명", "품번", "기준일", "미달수량",
+        "비교수량", "판정", "상세",
     ]
-
-    grouped = (
-        df.groupby(["비교키", "공정", "작업장명", "작업반명", "품번", "날짜"], as_index=False)
-        .agg({"지시량": "sum", "실적량": "sum"})
-    )
-
-    return grouped.sort_values(
-        ["공정", "작업장명", "작업반명", "품번", "날짜"]
-    ).reset_index(drop=True)
-# =========================
-#  오늘 실적 정규화
-# =========================
-
-def extract_today_actual(today_actual_file: str) -> pd.DataFrame:
-    if not today_actual_file:
-        return pd.DataFrame(columns=["공정", "품번", "오늘실적수량"])
-
-    df = pd.read_excel(today_actual_file)
-
-    needed = ["공정", "품번", "실적수량"]
-    missing = [c for c in needed if c not in df.columns]
-    if missing:
-        raise RuntimeError(f"오늘 실적 파일에 필요한 컬럼이 없습니다: {missing}")
-
-    df = df[needed].copy()
-    df["공정"] = df["공정"].apply(normalize_today_actual_process)
-    df["품번"] = df["품번"].apply(normalize_part_no)
-    df["실적수량"] = pd.to_numeric(df["실적수량"], errors="coerce").fillna(0)
-
-    df = df[df["공정"].notna()].copy()
-
-    grouped = (
-        df.groupby(["공정", "품번"], as_index=False)
-          .agg(오늘실적수량=("실적수량", "sum"))
-    )
-
-    return grouped
-# =========================
-# 계획 집계
-# =========================
-def build_plan_compare_base(plan_df: pd.DataFrame) -> pd.DataFrame:
     if plan_df.empty:
-        return pd.DataFrame(columns=[
-            "공정", "작업장명", "작업반명", "날짜", "품번",
-            "미달수량", "계획수량", "실적수량", "잔량판단합계"
-        ])
+        return pd.DataFrame(columns=result_columns)
 
-    df = plan_df.copy()
-    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce").dt.normalize()
-    df["품번"] = df["품번"].astype(str).str.strip()
-    df["구분"] = df["구분"].astype(str).str.strip()
-    df["수량"] = pd.to_numeric(df["수량"], errors="coerce").fillna(0)
-
-    grouped = (
-        df.groupby(["비교키", "공정", "작업장명", "작업반명", "날짜", "품번", "구분"], as_index=False)
-          .agg(수량=("수량", "sum"))
+    base_date = (
+        pd.Timestamp(today).normalize()
+        if today is not None else pd.Timestamp.today().normalize()
     )
-
-    pivot = grouped.pivot_table(
-        index=["비교키", "공정", "작업장명", "작업반명", "날짜", "품번"],
-        values="수량",
-        aggfunc="sum",
-        fill_value=0,
-    ).reset_index()
-
-    for col in ["미달", "계획", "실적"]:
-        if col not in pivot.columns:
-            pivot[col] = 0
-
-    pivot = pivot.rename(columns={
-        "미달": "미달수량",
-        "계획": "계획수량",
-        "실적": "실적수량",
-    })
-    pivot["잔량판단합계"] = pivot["미달수량"] + pivot["계획수량"] + pivot["실적수량"]
-
-    return pivot.sort_values(
-        ["공정", "작업장명", "작업반명", "품번", "날짜"]
-    ).reset_index(drop=True)
-
-
-# =========================
-# 비교 로직
-# =========================
-def compare_plan_mes_with_fifo(plan_df: pd.DataFrame, mes_df: pd.DataFrame, today_actual_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-    """
-    비교 핵심 로직
-
-    계산 기준:
-    1. 같은 공정/작업장/작업반/품번 단위로 날짜순 계산
-    2. 음수 미달 = 선생산 → 미래 계획에 먼저 사용
-    3. 양수 미달 = 과거 계획 잔량 스냅샷
-       - 이전 open plan 잔량이 없을 때만 backlog로 봄
-    4. 계획표 실적은 가장 오래된 미완료 계획부터 FIFO 차감
-    5. MES 작업지시가 0이어도 계획표 실적으로 계획이 소진되었으면 정상
-    6. MES 작업지시가 없고 미달흐름이 맞으면 미달이월 정상으로 인정
-    """
-
-    if plan_df.empty:
-        return pd.DataFrame(columns=FINAL_COMPARE_COLUMNS)
 
     plan = plan_df.copy()
-    mes = mes_df.copy()
-
-    key_cols = ["비교키"]
-    display_cols = ["공정", "작업장명", "작업반명", "품번", "날짜"]
-
-    # =========================
-    # 기본 정규화
-    # =========================
     plan["날짜"] = pd.to_datetime(plan["날짜"], errors="coerce").dt.normalize()
-    mes["날짜"] = pd.to_datetime(mes["날짜"], errors="coerce").dt.normalize()
-
     plan["수량"] = pd.to_numeric(plan["수량"], errors="coerce").fillna(0)
-    mes["지시량"] = pd.to_numeric(mes["지시량"], errors="coerce").fillna(0)
-    mes["실적량"] = pd.to_numeric(mes["실적량"], errors="coerce").fillna(0)
-
     plan["품번"] = plan["품번"].apply(normalize_part_no)
-    mes["품번"] = mes["품번"].apply(normalize_part_no)
+    plan["구분"] = plan["구분"].fillna("").astype(str).str.strip()
 
-    # =========================
-    # 오늘 실적 맵
-    # =========================
-    today_actual_map = {}
+    mes = mes_df.copy()
+    if not mes.empty:
+        mes["날짜"] = pd.to_datetime(mes["날짜"], errors="coerce").dt.normalize()
+        mes["지시량"] = pd.to_numeric(mes["지시량"], errors="coerce").fillna(0)
+        mes["실적량"] = pd.to_numeric(mes["실적량"], errors="coerce").fillna(0)
+        mes["품번"] = mes["품번"].apply(normalize_part_no)
 
-    if today_actual_df is not None and not today_actual_df.empty:
-        tmp = today_actual_df.copy()
-        tmp["품번"] = tmp["품번"].apply(normalize_part_no)
-        tmp["공정"] = tmp["공정"].astype(str).str.strip()
-
-        today_actual_map = {
-            (row["공정"], row["품번"]): safe_float(row["오늘실적수량"])
-            for _, row in tmp.iterrows()
-        }
-
-    # =========================
-    # 계획 피벗: 미달/계획/실적 분리
-    # =========================
-    plan_display = (
-        plan.sort_values(display_cols)
-        .groupby(key_cols, as_index=False)
-        .agg({
-            "공정": "first",
-            "작업장명": "first",
-            "작업반명": "first",
-            "품번": "first",
-            "날짜": "first",
-        })
-    )
-
-    pivot = (
-        plan.groupby(key_cols + ["구분"], as_index=False)
-            .agg(수량=("수량", "sum"))
-            .pivot_table(
-                index=key_cols,
-                columns="구분",
-                values="수량",
-                aggfunc="sum",
-                fill_value=0
-            )
-            .reset_index()
-    )
-    pivot = pivot.merge(plan_display, on=key_cols, how="left")
-
-    for col in ["계획", "미달", "실적"]:
-        if col not in pivot.columns:
-            pivot[col] = 0
-
-    pivot = pivot.rename(columns={
-        "계획": "계획수량",
-        "미달": "미달수량",
-        "실적": "계획표실적수량",
-    })
-
-    # FIFO 계산 그룹키
-    pivot["FIFO그룹키"] = pivot.apply(
-        lambda x: make_fifo_group_key(
-            x["공정"],
-            x["작업장명"],
-            x["작업반명"],
-            x["품번"]
-        ),
-        axis=1
-    )
-
-    # 공정인쇄 표시용
-    plan_info = (
-        plan[plan["구분"] == "계획"]
-        .groupby(key_cols, as_index=False)
+    shortage = plan[(plan["날짜"] == base_date) & (plan["구분"] == "미달")].copy()
+    if target_keys is not None:
+        shortage = shortage[
+            shortage["품번"].isin(target_keys)
+        ]
+    shortage = (
+        shortage.groupby(["품번"], as_index=False, dropna=False)
         .agg(
-            공정인쇄=(
-                "공정인쇄",
-                lambda s: " / ".join(sorted({x for x in s if normalize_process_token(x)}))
+            공정=("공정", "first"),
+            작업장명=("작업장명", "first"),
+            작업반명=("작업반명", "first"),
+            미달수량=("수량", "sum"),
+        )
+    )
+
+    results = []
+    for row in shortage.itertuples(index=False):
+        process = row.공정
+        part_no = row.품번
+        shortage_qty = float(row.미달수량)
+        same_plan = plan[plan["품번"] == part_no]
+        same_mes = mes[mes["품번"] == part_no]
+
+        if shortage_qty > 0:
+            past_mes = same_mes[same_mes["날짜"] <= base_date]
+            outstanding = float((past_mes["지시량"] - past_mes["실적량"]).sum())
+            matched = abs(outstanding - shortage_qty) < 1e-9
+            checks = []
+            remaining = shortage_qty
+            past_plan = same_plan[
+                (same_plan["날짜"] < base_date) & (same_plan["구분"] == "계획")
+            ]
+            past_plan = (
+                past_plan.groupby("날짜", as_index=False)["수량"].sum()
+                .sort_values("날짜", ascending=False)
             )
-        )
-    )
+            for plan_row in past_plan.itertuples(index=False):
+                day = plan_row.날짜
+                plan_qty = float(plan_row.수량)
+                day_mes = same_mes[same_mes["날짜"] == day]
+                work_qty = float(day_mes["지시량"].sum())
+                actual_qty = float(day_mes["실적량"].sum())
 
-    pivot = pivot.merge(plan_info, on=key_cols, how="left")
-    pivot["공정인쇄"] = pivot["공정인쇄"].fillna("")
-
-    # =========================
-    # MES merge
-    # =========================
-    mes2 = mes.rename(columns={
-        "지시량": "작업지시수량",
-        "실적량": "MES실적량_원본"
-    })
-
-    mes2 = (
-        mes2.sort_values(display_cols)
-        .groupby(key_cols, as_index=False)
-        .agg({
-            "공정": "first",
-            "작업장명": "first",
-            "작업반명": "first",
-            "품번": "first",
-            "날짜": "first",
-            "작업지시수량": "sum",
-            "MES실적량_원본": "sum",
-        })
-    )
-
-    pivot = pivot.merge(
-        mes2[key_cols + ["작업지시수량", "MES실적량_원본"]],
-        on=key_cols,
-        how="left"
-    )
-
-    pivot["작업지시수량"] = pd.to_numeric(
-        pivot["작업지시수량"], errors="coerce"
-    ).fillna(0)
-
-    pivot["MES실적량_원본"] = pd.to_numeric(
-        pivot["MES실적량_원본"], errors="coerce"
-    ).fillna(0)
-
-    result_rows = []
-
-    # =========================
-    # 그룹별 FIFO 계산
-    # =========================
-    for _, g in pivot.groupby("FIFO그룹키", dropna=False, sort=False):
-        g = g.sort_values("날짜").reset_index(drop=True)
-
-        group_process = normalize_process_token(g.loc[0, "공정"])
-        group_part = normalize_part_no(g.loc[0, "품번"])
-
-        today_actual_remain = safe_float(
-            today_actual_map.get((group_process, group_part), 0.0)
-        )
-
-        # 음수 미달, 즉 선생산 잔량
-        prebuild_pool = 0
-
-        # 양수 미달. 이전 계획 잔량이 없는 경우에만 backlog로 사용
-        backlog_midal_pool = 0
-
-        # 미완료 계획 FIFO 큐
-        open_plans = []
-
-        # 계획행별 계산결과 저장
-        row_states = {}
-
-        # =========================
-        # 1차 패스: 선생산/미달/실적 배분
-        # =========================
-        for i, row in g.iterrows():
-            plan_qty = safe_float(row["계획수량"])
-            midal_qty = safe_float(row["미달수량"])
-            plan_sheet_actual_qty = abs(safe_float(row["계획표실적수량"]))
-            mes_actual_qty = abs(safe_float(row["MES실적량_원본"]))
-            work_qty = safe_float(row["작업지시수량"])
-
-            # 완전 0행 제거
-            if (
-                plan_qty == 0
-                and midal_qty == 0
-                and plan_sheet_actual_qty == 0
-                and mes_actual_qty == 0
-                and work_qty == 0
-            ):
-                continue
-
-            # MES 실적에 오늘 실적이 이미 포함된 경우, 비교용으로 차감
-            deduct_today = min(mes_actual_qty, today_actual_remain)
-            mes_actual_for_compare = mes_actual_qty - deduct_today
-            today_actual_remain -= deduct_today
-
-            # 음수 미달 = 선생산 잔량 스냅샷.
-            # 실적이 없으면 같은 음수 미달이 이어지므로 누적하지 않고 현재 잔량으로 갱신한다.
-            if midal_qty < 0:
-                prebuild_pool = abs(midal_qty)
-
-            # 현재 미완료 계획 잔량
-            open_remain_sum = sum(p["remain"] for p in open_plans)
-
-            # 양수 미달은 과거 계획 잔량.
-            # 이미 open plan 잔량이 있으면 중복 반영하지 않음.
-            if midal_qty > 0 and open_remain_sum == 0:
-                backlog_midal_pool = midal_qty
-
-            used_prebuild_for_this_plan = 0
-
-            # 계획 등록
-            if plan_qty > 0:
-                used_prebuild_for_this_plan = min(prebuild_pool, plan_qty)
-                prebuild_pool -= used_prebuild_for_this_plan
-
-                open_plan = {
-                    "row_index": i,
-                    "plan_qty": plan_qty,
-                    "remain": plan_qty - used_prebuild_for_this_plan,
-                    "used_prebuild": used_prebuild_for_this_plan,
-                    "used_actual": 0,
-                }
-
-                open_plans.append(open_plan)
-
-                row_states[i] = {
-                    "row": row,
-                    "plan_qty": plan_qty,
-                    "midal_qty": midal_qty,
-                    "current_midal": max(midal_qty, 0),
-                    "plan_sheet_actual_qty": plan_sheet_actual_qty,
-                    "mes_actual_qty": mes_actual_qty,
-                    "mes_actual_for_compare": mes_actual_for_compare,
-                    "work_qty": work_qty,
-                    "used_prebuild": used_prebuild_for_this_plan,
-                    "used_actual": 0,
-                }
-
-            # 실적 배분 시작
-            remain_actual = plan_sheet_actual_qty
-
-            # 이전 기간 미달 backlog가 있으면 먼저 차감
-            if backlog_midal_pool > 0 and remain_actual > 0:
-                used_for_backlog = min(backlog_midal_pool, remain_actual)
-                backlog_midal_pool -= used_for_backlog
-                remain_actual -= used_for_backlog
-
-            # 남은 실적은 가장 오래된 계획부터 FIFO 차감
-            for p in open_plans:
-                if remain_actual <= 0:
-                    break
-
-                if p["remain"] <= 0:
+                if remaining <= 0:
+                    if work_qty != 0 or actual_qty != 0:
+                        matched = False
+                        checks.append(f"{day:%Y-%m-%d} 소멸 대상 작업지시가 남음")
                     continue
 
-                used = min(p["remain"], remain_actual)
+                expected_work = plan_qty
+                expected_actual = max(0.0, plan_qty - remaining)
+                if (
+                    abs(work_qty - expected_work) >= 1e-9
+                    or abs(actual_qty - expected_actual) >= 1e-9
+                ):
+                    matched = False
+                    checks.append(
+                        f"{day:%Y-%m-%d} 기대 지시/실적 "
+                        f"{expected_work:g}/{expected_actual:g}, "
+                        f"MES {work_qty:g}/{actual_qty:g}"
+                    )
+                remaining = max(0.0, remaining - plan_qty)
 
-                p["remain"] -= used
-                p["used_actual"] += used
-                remain_actual -= used
+            if remaining > 0:
+                matched = False
+                checks.append(f"과거 계획보다 큰 미달 잔량 {remaining:g}")
+            detail = (
+                "; ".join(checks)
+                if checks else f"최신 계획부터 미달 {shortage_qty:g} 정상 배분"
+            )
+            compare_qty = outstanding
+        elif shortage_qty < 0:
+            prebuilt = abs(shortage_qty)
+            future_plan = same_plan[
+                (same_plan["날짜"] >= base_date) & (same_plan["구분"] == "계획")
+            ]
+            future_plan = (
+                future_plan.groupby("날짜", as_index=False)["수량"].sum()
+                .sort_values("날짜")
+            )
 
-                target_i = p["row_index"]
+            matched = True
+            remaining = prebuilt
+            checks = []
+            compare_qty = 0.0
+            for plan_row in future_plan.itertuples(index=False):
+                day = plan_row.날짜
+                plan_qty = float(plan_row.수량)
+                day_mes = same_mes[same_mes["날짜"] == day]
+                work_qty = float(day_mes["지시량"].sum())
+                actual_qty = float(day_mes["실적량"].sum())
 
-                if target_i in row_states:
-                    row_states[target_i]["used_actual"] = p["used_actual"]
+                if remaining >= plan_qty:
+                    if work_qty != 0 or actual_qty != 0:
+                        matched = False
+                        checks.append(
+                            f"{day:%Y-%m-%d} 소진 계획 {plan_qty:g}인데 MES 작업지시가 남음"
+                        )
+                    remaining -= plan_qty
+                    if remaining == 0:
+                        break
+                    continue
 
-        # =========================
-        # 2차 패스: 판정 생성
-        # =========================
-        for i, state in row_states.items():
-            row = state["row"]
+                expected_actual = remaining
+                compare_qty = actual_qty
+                if work_qty == 0 or abs(actual_qty - expected_actual) >= 1e-9:
+                    matched = False
+                    checks.append(
+                        f"{day:%Y-%m-%d} 기대 실적 {expected_actual:g}, "
+                        f"MES 지시/실적 {work_qty:g}/{actual_qty:g}"
+                    )
+                remaining = 0
+                break
 
-            plan_qty = state["plan_qty"]
-            midal_qty = state["midal_qty"]
-            current_midal = state["current_midal"]
-            plan_sheet_actual_qty = state["plan_sheet_actual_qty"]
-            mes_actual_qty = state["mes_actual_qty"]
-            mes_actual_for_compare = state["mes_actual_for_compare"]
-            work_qty = state["work_qty"]
+            if remaining > 0:
+                matched = False
+                checks.append(f"오늘 이후 계획 부족: 미반영 선실적 {remaining:g}")
+            detail = "; ".join(checks) if checks else f"선실적 {prebuilt:g} 정상 반영"
+        else:
+            matched = True
+            compare_qty = 0.0
+            detail = "미달수량 0"
 
-            used_prebuild = state["used_prebuild"]
-            plan_actual_for_today = state["used_actual"]
+        results.append({
+            "공정": process,
+            "작업장명": row.작업장명,
+            "작업반명": row.작업반명,
+            "품번": part_no,
+            "기준일": base_date.strftime("%Y-%m-%d"),
+            "미달수량": shortage_qty,
+            "비교수량": compare_qty,
+            "판정": "실적흐름일치" if matched else "실적흐름불일치",
+            "상세": detail,
+        })
 
-            completed_qty = used_prebuild + plan_actual_for_today
+    return pd.DataFrame(results, columns=result_columns)
 
-            # =========================
-            # 미달 흐름 판정
-            # =========================
-            calculated_next_midal = midal_qty + plan_qty - plan_sheet_actual_qty
 
-            # 다음 날짜의 미달 0도 의미 있는 값으로 본다.
-            # 0을 건너뛰면 이전 미달/초과 실적 때문에 다음 계획이 부족해야 하는 상황을 놓칠 수 있다.
-            future_midal_rows = g.loc[i + 1:].copy()
+def compare_work_orders(
+    plan_df: pd.DataFrame,
+    mes_df: pd.DataFrame,
+    today=None,
+) -> pd.DataFrame:
+    """계획과 MES 작업지시 수량을 비교한다.
 
-            if not future_midal_rows.empty:
-                next_midal = safe_float(future_midal_rows.iloc[0]["미달수량"])
+    작일 음수 미달에 의해 완전히 소진되는 오늘 이후 계획은 작업지시가 없는
+    것이 정상이다. 실적 흐름과 중복되는 총실적 초과/계획 소진 후 잔존 판정은
+    여기서 수행하지 않는다.
+    """
+    columns = [
+        "공정", "작업장명", "작업반명", "품번", "날짜",
+        "계획수량", "미달수량", "MES실적수량", "작업지시수량",
+        "1차판정", "판정", "상세",
+    ]
+    if plan_df.empty and mes_df.empty:
+        return pd.DataFrame(columns=columns)
 
-                if abs(calculated_next_midal - next_midal) < 0.000001:
-                    midal_judge = "미달흐름일치"
-                else:
-                    midal_judge = "미달흐름불일치"
-            else:
-                midal_judge = "미달흐름확인제외"
+    base_date = (
+        pd.Timestamp(today).normalize()
+        if today is not None else pd.Timestamp.today().normalize()
+    )
+    key_columns = ["품번", "날짜"]
 
-            midal_flow_ok = midal_judge in ("미달흐름일치", "미달흐름확인제외")
+    plan = plan_df.copy()
+    if not plan.empty:
+        plan["날짜"] = pd.to_datetime(plan["날짜"], errors="coerce").dt.normalize()
+        plan["수량"] = pd.to_numeric(plan["수량"], errors="coerce").fillna(0)
+        plan["품번"] = plan["품번"].apply(normalize_part_no)
+        plan["구분"] = plan["구분"].fillna("").astype(str).str.strip()
 
-            # =========================
-            # 작업지시 판정
-            # =========================
-            if work_qty == plan_qty:
-                work_judge = "작업지시일치"
+    mes = mes_df.copy()
+    if not mes.empty:
+        mes["날짜"] = pd.to_datetime(mes["날짜"], errors="coerce").dt.normalize()
+        mes["지시량"] = pd.to_numeric(mes["지시량"], errors="coerce").fillna(0)
+        mes["실적량"] = pd.to_numeric(mes["실적량"], errors="coerce").fillna(0)
+        mes["품번"] = mes["품번"].apply(normalize_part_no)
 
-            elif work_qty == 0 and plan_qty > 0 and mes_actual_qty == plan_qty:
-                work_judge = "작업지시일치_MES실적대체"
-
-            elif work_qty == 0 and completed_qty >= plan_qty:
-                work_judge = "작업지시일치후소멸"
-
-            elif (
-                work_qty == 0
-                and plan_qty > 0
-                and midal_qty > 0
-                and plan_sheet_actual_qty > 0
-                and midal_flow_ok
-            ):
-                work_judge = "작업지시일치후미달이월"
-
-            elif work_qty < plan_qty:
-                work_judge = "작업지시부족"
-
-            else:
-                work_judge = "작업지시과다"
-
-            # =========================
-            # 실적 판정
-            # 작업지시관리 실적량은 생산실적현황과 차이가 날 수 있으므로,
-            # 비교 계산은 계획표의 실적분을 기준으로 진행한다.
-            # =========================
-            if work_judge in ("작업지시일치후소멸", "작업지시일치후미달이월"):
-                actual_judge = "실적확인제외_MES소멸"
-            else:
-                actual_judge = "실적확인제외_계획표실적기준"
-
-            # =========================
-            # 최종 판정
-            # =========================
-            if (
-                work_judge in (
-                    "작업지시일치",
-                    "작업지시일치후소멸",
-                    "작업지시일치후미달이월",
-                    "작업지시일치_MES실적대체",
-                )
-                and actual_judge in ("실적일치", "실적확인제외_MES소멸", "실적확인제외_계획표실적기준")
-                and midal_judge in ("미달흐름일치", "미달흐름확인제외")
-            ):
-                judge = "일치"
-            else:
-                judge = f"{work_judge}/{actual_judge}/{midal_judge}"
-
-            result_rows.append({
-                "품번": normalize_part_no(row["품번"]),
-                "날짜": row["날짜"],
-                "공정": row["공정"],
-                "작업장명": row["작업장명"],
-                "작업반명": row["작업반명"],
-                "공정인쇄": row["공정인쇄"],
-                "계획수량": plan_qty,
-                "미달수량": current_midal,
-                "계획표실적수량": plan_sheet_actual_qty,
-                "MES실적수량": mes_actual_qty,
-                "전일마감기준실적수량": plan_sheet_actual_qty,
-                "계획대비실적수량": plan_actual_for_today,
-                "작업지시수량": work_qty,
-                "판정": judge,
-                "_미달원본수량": midal_qty,
-                "_선생산적용수량": used_prebuild,
-            })
-
-    result = pd.DataFrame(result_rows)
-
-    # =========================
-    # 결과 0행 제거
-    # =========================
-    if not result.empty:
-        qty_cols = [
-            "계획수량",
-            "미달수량",
-            "계획표실적수량",
-            "MES실적수량",
-            "전일마감기준실적수량",
-            "계획대비실적수량",
-            "작업지시수량",
-        ]
-
-        for c in qty_cols:
-            result[c] = pd.to_numeric(result[c], errors="coerce").fillna(0)
-
-        result = result[result[qty_cols].abs().sum(axis=1) != 0].copy()
-
-    # =========================
-    # 계획 없는 MES 작업지시 처리
-    # 단, 이후 양수 미달로 설명 가능하면 일치 처리
-    # =========================
-    plan_keys = (
-        pivot[pivot["계획수량"] > 0][key_cols]
-        .drop_duplicates()
-        .assign(계획존재=1)
+    plan_rows = plan[plan["구분"] == "계획"].copy()
+    plan_grouped = (
+        plan_rows.groupby(key_columns, as_index=False, dropna=False)
+        .agg(
+            공정=("공정", "first"),
+            작업장명=("작업장명", "first"),
+            작업반명=("작업반명", "first"),
+            계획수량=("수량", "sum"),
+        )
+    )
+    mes_grouped = (
+        mes.groupby(key_columns, as_index=False, dropna=False)
+        .agg(
+            MES공정=("공정", "first"),
+            MES작업장명=("작업장명", "first"),
+            MES작업반명=("작업반명", "first"),
+            작업지시수량=("지시량", "sum"),
+            MES실적수량=("실적량", "sum"),
+        )
+        if not mes.empty else pd.DataFrame(
+            columns=key_columns + ["MES공정", "MES작업장명", "MES작업반명", "작업지시수량", "MES실적수량"]
+        )
     )
 
-    mes_only = mes2.merge(plan_keys, on=key_cols, how="left")
-    mes_only = mes_only[mes_only["계획존재"].isna()].copy()
+    # 오늘 미달이 0 이하이면 오늘까지의 미지시 계획은 정상 소멸로 본다.
+    current_shortages = plan[
+        (plan["구분"] == "미달") & (plan["날짜"] == base_date)
+    ].groupby(["품번"], as_index=False)["수량"].sum()
+    shortage_map = {
+        row.품번: float(row.수량)
+        for row in current_shortages.itertuples(index=False)
+    }
+    cleared_groups = {
+        row.품번
+        for row in current_shortages.itertuples(index=False)
+        if float(row.수량) <= 0
+    }
 
-    midal_history = {}
-    for gkey, h in pivot.groupby("FIFO그룹키", dropna=False, sort=False):
-        midal_history[gkey] = h.sort_values("날짜").copy()
-
-    def remaining_midal_until(gkey, day) -> float:
-        """
-        양수 미달은 날짜별 잔량 스냅샷으로 보고, 이후 계획표 실적이 있으면 먼저 차감한다.
-        같은 미달이 여러 날짜에 반복 표시되어도 누적하지 않는다.
-        """
-        history = midal_history.get(gkey)
-        if history is None or history.empty:
-            return 0
-
-        day = pd.to_datetime(day, errors="coerce").normalize()
-        remain = 0
-
-        for _, hrow in history[history["날짜"] <= day].iterrows():
-            midal_qty = safe_float(hrow["미달수량"])
-            actual_qty = abs(safe_float(hrow["계획표실적수량"]))
-
-            if midal_qty > 0:
-                remain = midal_qty
-            elif midal_qty < 0:
-                remain = 0
-
-            if actual_qty > 0 and remain > 0:
-                remain = max(0, remain - actual_qty)
-
-        return remain
-
-    def remaining_midal_for_mes_only(gkey, day) -> float:
-        """
-        계획표 기간보다 앞선 MES 작업지시는 이후 첫 미달 잔량으로 설명할 수 있다.
-        단, 이미 양수 미달이 나타난 뒤 해소된 경우에는 미래 작업지시를 다시 인정하지 않는다.
-        """
-        history = midal_history.get(gkey)
-        if history is None or history.empty:
-            return 0
-
-        day = pd.to_datetime(day, errors="coerce").normalize()
-        first_history_day = pd.to_datetime(history["날짜"], errors="coerce").min()
-
-        # 계획표 기간 안쪽의 MES-only 작업지시는 미래 미달로 인정하지 않는다.
-        # 미래 미달 인정은 계획표 시작 전 작업지시가 다음 기간 미달로 이어지는 경우만 허용한다.
-        if pd.notna(first_history_day) and day >= first_history_day:
-            return remaining_midal_until(gkey, day)
-
-        past_history = history[history["날짜"] <= day]
-        if (past_history["미달수량"].apply(lambda x: safe_float(x) > 0)).any():
-            return remaining_midal_until(gkey, day)
-
-        future_history = history[history["날짜"] > day]
-        for _, hrow in future_history.iterrows():
-            midal_qty = safe_float(hrow["미달수량"])
-            if midal_qty > 0:
-                return max(0, midal_qty - abs(safe_float(hrow["계획표실적수량"])))
-            if midal_qty < 0:
-                return 0
-
-        return 0
-
-    if not mes_only.empty:
-        mes_only["공정인쇄"] = ""
-        mes_only["계획수량"] = 0
-        mes_only["미달수량"] = 0
-        mes_only["계획표실적수량"] = 0
-
-        mes_only["MES실적수량"] = pd.to_numeric(
-            mes_only["MES실적량_원본"], errors="coerce"
-        ).fillna(0).abs()
-
-        mes_only["전일마감기준실적수량"] = mes_only["MES실적수량"]
-        mes_only["계획대비실적수량"] = 0
-
-        used_midal_by_group = {}
-        judge_list = []
-
-        mes_only = mes_only.sort_values(["공정", "작업장명", "작업반명", "품번", "날짜"]).copy()
-        result_work = result.copy()
-        if not result_work.empty:
-            result_work["_MES_ONLY허용차감그룹키"] = result_work.apply(
-                lambda x: make_fifo_group_key(
-                    x["공정"],
-                    x["작업장명"],
-                    x["작업반명"],
-                    x["품번"]
-                ),
-                axis=1
-            )
-
-        for _, r in mes_only.iterrows():
-            gkey = make_fifo_group_key(
-                r["공정"],
-                r["작업장명"],
-                r["작업반명"],
-                r["품번"]
-            )
-
-            work_qty = safe_float(r["작업지시수량"])
-            if result_work.empty:
-                existing_work_qty = 0
+    # 양수 미달은 오늘 이전 계획을 최신 날짜부터 역순으로 남긴다.
+    positive_shortage_absorbed_keys = set()
+    positive_shortages = current_shortages[current_shortages["수량"] > 0]
+    for shortage in positive_shortages.itertuples(index=False):
+        remaining = float(shortage.수량)
+        past = plan_grouped[
+            (plan_grouped["품번"] == shortage.품번)
+            & (plan_grouped["날짜"] < base_date)
+        ].sort_values("날짜", ascending=False)
+        for past_row in past.itertuples(index=False):
+            if remaining > 0:
+                remaining = max(0.0, remaining - float(past_row.계획수량))
             else:
-                mes_only_day = pd.to_datetime(r["날짜"], errors="coerce").normalize()
-                existing_work_qty = result_work[
-                    result_work["_MES_ONLY허용차감그룹키"].eq(gkey)
-                    & (pd.to_datetime(result_work["날짜"], errors="coerce").dt.normalize() <= mes_only_day)
-                ]["작업지시수량"].apply(safe_float).sum()
-
-            remain_midal = max(
-                0,
-                remaining_midal_for_mes_only(gkey, r["날짜"])
-                - existing_work_qty
-                - used_midal_by_group.get(gkey, 0)
-            )
-
-            if remain_midal > 0:
-                use_qty = min(remain_midal, work_qty)
-                used_midal_by_group[gkey] = used_midal_by_group.get(gkey, 0) + use_qty
-
-                if work_qty <= remain_midal:
-                    judge = "일치"
-                else:
-                    judge = "부분일치_초과작업지시존재"
-            else:
-                judge = "해당날짜_계획없는데작업지시있음"
-
-            judge_list.append(judge)
-
-        mes_only["판정"] = judge_list
-
-        mes_only = mes_only[
-            (
-                mes_only["작업지시수량"].abs()
-                + mes_only["MES실적수량"].abs()
-            ) != 0
-        ].copy()
-
-        mes_only = mes_only[FINAL_COMPARE_COLUMNS]
-
-        result = pd.concat([result, mes_only], ignore_index=True)
-
-    # =========================
-    # 최종 정리
-    # =========================
-    if result.empty:
-        return pd.DataFrame(columns=FINAL_COMPARE_COLUMNS)
-
-    # =========================
-    # 총 실적이 총 계획을 초과했는데 작업지시가 남은 경우 오류 처리
-    # =========================
-    result["_초과검사그룹키"] = result.apply(
-        lambda x: make_fifo_group_key(
-            x["공정"],
-            x["작업장명"],
-            x["작업반명"],
-            x["품번"]
-        ),
-        axis=1
-    )
-
-    for _, idx in result.groupby("_초과검사그룹키", dropna=False).groups.items():
-        group = result.loc[idx]
-        total_plan_qty = group["계획수량"].sum()
-        total_actual_qty = group["계획표실적수량"].sum()
-
-        if total_plan_qty > 0 and total_actual_qty > total_plan_qty:
-            remain_work_mask = group["작업지시수량"] > 0
-            target_idx = group[remain_work_mask].index
-
-            for row_idx in target_idx:
-                current_judge = str(result.at[row_idx, "판정"] or "")
-                extra_judge = "총실적초과_작업지시잔존"
-
-                if current_judge == "일치":
-                    result.at[row_idx, "판정"] = extra_judge
-                elif extra_judge not in current_judge:
-                    result.at[row_idx, "판정"] = f"{extra_judge}/{current_judge}"
-
-    # =========================
-    # 이전 실적 초과분이 해당 날짜 계획 전체를 덮는데 작업지시가 남은 경우 오류 처리
-    # =========================
-    for _, idx in result.groupby("_초과검사그룹키", dropna=False).groups.items():
-        group = result.loc[idx].copy()
-        group["날짜"] = pd.to_datetime(group["날짜"], errors="coerce").dt.normalize()
-        group = group.sort_values("날짜")
-
-        cumulative_plan = 0
-        cumulative_actual = 0
-
-        for row_idx, row in group.iterrows():
-            plan_qty = safe_float(row["계획수량"])
-            work_qty = safe_float(row["작업지시수량"])
-            previous_surplus = max(0, cumulative_actual - cumulative_plan)
-
-            current_prebuild = max(0, -safe_float(row.get("_미달원본수량", 0)))
-
-            if (
-                plan_qty > 0
-                and work_qty > 0
-                and (
-                    previous_surplus >= plan_qty
-                    or current_prebuild >= plan_qty
+                positive_shortage_absorbed_keys.add(
+                    (shortage.품번, past_row.날짜)
                 )
-            ):
-                current_judge = str(result.at[row_idx, "판정"] or "")
-                extra_judge = "이전실적초과_작업지시잔존"
 
-                if current_judge == "일치":
-                    result.at[row_idx, "판정"] = extra_judge
-                elif extra_judge not in current_judge:
-                    result.at[row_idx, "판정"] = f"{extra_judge}/{current_judge}"
+    # 음수 미달로 전량 소진되어 MES 작업지시가 없어야 하는 오늘 이후 계획 날짜를 계산한다.
+    absorbed_keys = set()
+    shortages = current_shortages[current_shortages["수량"] < 0]
+    for shortage in shortages.itertuples(index=False):
+        remaining = abs(float(shortage.수량))
+        future = plan_grouped[
+            (plan_grouped["품번"] == shortage.품번)
+            & (plan_grouped["날짜"] >= base_date)
+        ].sort_values("날짜")
+        for future_row in future.itertuples(index=False):
+            if remaining < float(future_row.계획수량):
+                break
+            absorbed_keys.add((shortage.품번, future_row.날짜))
+            remaining -= float(future_row.계획수량)
+            if remaining == 0:
+                break
 
-            cumulative_plan += plan_qty
-            cumulative_actual += safe_float(row["계획표실적수량"])
+    merged = plan_grouped.merge(mes_grouped, on=key_columns, how="outer")
+    for name in ["계획수량", "작업지시수량", "MES실적수량"]:
+        merged[name] = pd.to_numeric(merged[name], errors="coerce").fillna(0)
+    merged["공정"] = merged["공정"].fillna(merged["MES공정"])
+    merged["작업장명"] = merged["작업장명"].fillna(merged["MES작업장명"])
+    merged["작업반명"] = merged["작업반명"].fillna(merged["MES작업반명"])
+    merged["미달수량"] = [
+        shortage_map.get(part_no, 0.0)
+        for part_no in merged["품번"]
+    ]
 
-    # =========================
-    # 같은 날짜의 선생산과 FIFO 배분 실적보다 계획이 더 많으면 부족분만큼 작업지시가 있어야 함
-    # =========================
-    for _, idx in result.groupby(["_초과검사그룹키", "날짜"], dropna=False).groups.items():
-        group = result.loc[idx]
-        total_plan_qty = group["계획수량"].apply(safe_float).sum()
-        total_work_qty = group["작업지시수량"].apply(safe_float).sum()
-        total_allocated_actual_qty = group["계획대비실적수량"].apply(safe_float).sum()
-        total_prebuild_qty = group["_선생산적용수량"].apply(safe_float).sum()
-
-        required_work_qty = max(
-            0,
-            total_plan_qty - total_allocated_actual_qty - total_prebuild_qty
+    first_judgments = []
+    judgments = []
+    details = []
+    for row in merged.itertuples(index=False):
+        plan_qty = float(row.계획수량)
+        work_qty = float(row.작업지시수량)
+        actual_qty = float(row.MES실적수량)
+        key = (row.품번, row.날짜)
+        has_current_shortage = row.품번 in shortage_map
+        shortage_qty = shortage_map.get(row.품번, 0.0)
+        should_be_gone = (
+            key in absorbed_keys
+            or key in positive_shortage_absorbed_keys
+            or (
+                has_current_shortage
+                and shortage_qty <= 0
+                and row.날짜 < base_date
+            )
         )
 
-        if required_work_qty <= 0 or total_work_qty >= required_work_qty:
-            continue
+        # 1차는 미달/실적을 보지 않고 계획과 MES 작업지시만 비교한다.
+        if plan_qty == work_qty:
+            first_judge = "작업지시일치"
+        elif plan_qty == 0:
+            first_judge = "해당날짜_계획없는데작업지시있음"
+        elif work_qty == 0:
+            first_judge = "작업지시없음"
+        elif work_qty < plan_qty:
+            first_judge = "작업지시부족"
+        else:
+            first_judge = "작업지시과다"
 
-        shortage = required_work_qty - total_work_qty
-        for row_idx in group.index:
-            if safe_float(result.at[row_idx, "계획수량"]) <= 0:
-                continue
+        # 1차 불일치인 경우에만 미달과 MES 실적을 적용한다.
+        if first_judge == "작업지시일치" and not should_be_gone:
+            judge = first_judge
+            detail = f"계획/작업지시 {plan_qty:g}"
+        elif should_be_gone and work_qty > 0:
+            judge = "작업지시잔존"
+            detail = (
+                f"오늘 미달 {shortage_qty:g} 기준 소멸 대상인데 "
+                f"작업지시 {work_qty:g} 잔존"
+            )
+        elif should_be_gone and work_qty == 0:
+            judge = "작업지시일치"
+            detail = "미달 기준 소멸 대상 작업지시 정상 소멸"
+        elif key in absorbed_keys:
+            if work_qty == 0:
+                judge = "작업지시일치_선생산소진"
+                detail = f"계획 {plan_qty:g} 전량을 오늘 음수 미달로 소진"
+            else:
+                judge = "작업지시과다"
+                detail = f"선생산 소진 계획인데 작업지시 {work_qty:g} 남음"
+        elif key in positive_shortage_absorbed_keys and work_qty == 0:
+            judge = "작업지시일치"
+            detail = f"오늘 양수 미달 {row.미달수량:g}보다 오래된 계획 정상 소멸"
+        elif (
+            plan_qty > 0
+            and work_qty == 0
+            and row.날짜 <= base_date
+                and row.품번 in cleared_groups
+        ):
+            judge = "작업지시일치"
+            detail = f"오늘 미달 0 이하로 계획 {plan_qty:g}의 작업지시 정상 소멸"
+        elif plan_qty > 0 and work_qty == 0:
+            if actual_qty == plan_qty:
+                judge = "작업지시일치_MES실적대체"
+                detail = f"계획 {plan_qty:g}을 MES실적 {actual_qty:g}으로 충족"
+            else:
+                judge = "작업지시없음"
+                detail = f"계획 {plan_qty:g} / 작업지시 0 / MES실적 {actual_qty:g}"
+        elif first_judge == "작업지시부족":
+            judge = first_judge
+            detail = f"계획 {plan_qty:g} / 작업지시 {work_qty:g}"
+        elif first_judge == "작업지시과다":
+            judge = first_judge
+            detail = f"계획 {plan_qty:g} / 작업지시 {work_qty:g}"
+        else:
+            judge = first_judge
+            detail = f"계획 {plan_qty:g} / 작업지시 {work_qty:g} / MES실적 {actual_qty:g}"
+        first_judgments.append(first_judge)
+        judgments.append(judge)
+        details.append(detail)
 
-            current_judge = str(result.at[row_idx, "판정"] or "")
-            extra_judge = f"선생산차감후_작업지시부족({shortage:g})"
-
-            if current_judge == "일치":
-                result.at[row_idx, "판정"] = extra_judge
-            elif extra_judge not in current_judge:
-                result.at[row_idx, "판정"] = f"{extra_judge}/{current_judge}"
-
-    # =========================
-    # 계획표 실적이 해당 날짜 계획을 채웠는데 작업지시가 남은 경우 오류 처리
-    # =========================
-    for row_idx, row in result.iterrows():
-        plan_qty = safe_float(row["계획수량"])
-        work_qty = safe_float(row["작업지시수량"])
-        allocated_actual_qty = safe_float(row["계획대비실적수량"])
-        prebuild_qty = safe_float(row.get("_선생산적용수량", 0))
-
-        if plan_qty <= 0 or work_qty <= 0:
-            continue
-
-        if allocated_actual_qty + prebuild_qty < plan_qty:
-            continue
-
-        current_judge = str(result.at[row_idx, "판정"] or "")
-        extra_judge = "계획소진_작업지시잔존"
-
-        if current_judge == "일치":
-            result.at[row_idx, "판정"] = extra_judge
-        elif extra_judge not in current_judge:
-            result.at[row_idx, "판정"] = f"{extra_judge}/{current_judge}"
-
-    result = result.drop(columns=["_초과검사그룹키", "_미달원본수량", "_선생산적용수량"], errors="ignore")
-
-    qty_cols = [
-        "계획수량",
-        "미달수량",
-        "계획표실적수량",
-        "MES실적수량",
-        "전일마감기준실적수량",
-        "계획대비실적수량",
-        "작업지시수량",
-    ]
-    for c in qty_cols:
-        result[c] = pd.to_numeric(result[c], errors="coerce").fillna(0)
-    result = result[result[qty_cols].abs().sum(axis=1) != 0].copy()
-
-    if result.empty:
-        return pd.DataFrame(columns=FINAL_COMPARE_COLUMNS)
-
-    result = result[FINAL_COMPARE_COLUMNS]
-    result["날짜"] = pd.to_datetime(result["날짜"], errors="coerce").dt.strftime("%Y-%m-%d")
-
-    return result.sort_values(
-        ["공정", "작업장명", "작업반명", "품번", "날짜"]
-    ).reset_index(drop=True)
+    merged["1차판정"] = first_judgments
+    merged["판정"] = judgments
+    merged["상세"] = details
+    merged["품번최초날짜"] = merged.groupby("품번")["날짜"].transform("min")
+    merged = merged.sort_values(
+        ["품번최초날짜", "품번", "날짜"], ascending=[True, True, True]
+    )
+    return merged[columns].reset_index(drop=True)
 
 
-# =========================
-# 저장
-# =========================
-def save_results(plan_df, mes_df, plan_base_df, compare_df, output_file: str):
+def save_normalized_results(
+    plan_df: pd.DataFrame,
+    mes_df: pd.DataFrame,
+    shortage_flow_df: pd.DataFrame,
+    work_order_df: pd.DataFrame,
+    output_file: str,
+):
+    """새 알고리즘의 입력이 될 정규화 데이터만 저장한다."""
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         plan_df.to_excel(writer, sheet_name="1_계획정규화", index=False)
         mes_df.to_excel(writer, sheet_name="2_MES정규화", index=False)
-        plan_base_df.to_excel(writer, sheet_name="3_계획집계", index=False)
-        compare_df.to_excel(writer, sheet_name="4_비교결과", index=False)
+        shortage_flow_df.to_excel(writer, sheet_name="3_미달실적흐름", index=False)
+        work_order_output = work_order_df[[
+            "품번", "작업장명", "작업반명", "날짜", "계획수량",
+            "미달수량", "MES실적수량", "작업지시수량", "판정",
+        ]].copy()
+        work_order_output["날짜"] = pd.to_datetime(
+            work_order_output["날짜"], errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
+        work_order_output.to_excel(writer, sheet_name="4_작업지시판정", index=False)
 
-        if not compare_df.empty:
-            summary = (
-                compare_df.groupby("판정", as_index=False)
-                .size()
-                .rename(columns={"size": "건수"})
-            )
-            summary.to_excel(writer, sheet_name="5_요약", index=False)
 
-
-# =========================
-# 실행
-# =========================
 def main():
     root = tk.Tk()
     root.withdraw()
-
     root.attributes("-topmost", True)
-    root.lift()
-    root.focus_force()
 
     plan_file = select_excel_file("생산계획 엑셀 선택", root)
     if not plan_file:
         messagebox.showinfo("알림", "생산계획 엑셀을 선택하지 않았습니다.")
         return
-
     mes_file = select_excel_file("MES 작업지시 엑셀 선택", root)
     if not mes_file:
         messagebox.showinfo("알림", "MES 작업지시 엑셀을 선택하지 않았습니다.")
         return
-    
-    START_DATE, END_DATE = select_date_range(root)
 
-    root.update()  # 날짜 선택 창이 닫힌 후에 업데이트
-
+    start_date, end_date = select_date_range(root)
     global CHECK_RED_FONT
-    CHECK_RED_FONT = messagebox.askyesno("빨간 글씨 체크 제외", "계획표에서 빨간 글씨로 표시된 셀을 제외하시겠습니까?\n(수락하면 빨간 글씨는 수량 계산에서 제외됩니다)")
-    today_result_file = messagebox.askyesno("실적 적용 여부", "output.xlsx 같은 실적 파일을 불러와서\n작업지시 수량에 반영하시겠습니까?")
-    today_actual_file = None
-    if today_result_file:
-        today_actual_file = filedialog.askopenfilename(title="오늘 실적 파일 선택", filetypes=[("Excel files", "*.xlsx *.xls")])
-        if not today_actual_file:
-            messagebox.showinfo("알림", "오늘 실적 파일을 선택하지 않았습니다. 계속 진행합니다.")
-            today_actual_file = None
+    CHECK_RED_FONT = messagebox.askyesno(
+        "빨간 글씨 체크 제외",
+        "계획표에서 빨간 글씨로 표시된 셀을 제외하시겠습니까?\n"
+        "(수락하면 빨간 글씨는 수량 계산에서 제외됩니다)",
+    )
 
-    progress_win, progress = create_progress_window(root, "MES 작업지시 비교 진행")
-
+    progress_win, progress = create_progress_window(root, "MES 데이터 정규화 진행")
     try:
-        progress(5, "오늘 실적 정규화 중...")
-        today_actual_df = extract_today_actual(today_actual_file)
-        progress(10, f"오늘 실적 정규화 완료: {len(today_actual_df)}건")
-
         progress(20, "생산계획 정규화 중...")
-        plan_df = extract_plan_all(plan_file, progress=progress)
-        plan_df = filter_by_period(plan_df, start_date=START_DATE, end_date=END_DATE)
-        progress(50, f"계획 정규화 완료: {len(plan_df)}건")
-
-        progress(55, "MES 작업지시 정규화 중...")
-        mes_df = extract_mes(mes_file)
-        mes_df = filter_by_period(mes_df, start_date=START_DATE, end_date=END_DATE)
-        progress(65, f"MES 정규화 완료: {len(mes_df)}건")
-
-        progress(72, "계획 비교기준 생성 중...")
-        plan_base_df = build_plan_compare_base(plan_df)
-        progress(78, f"계획 비교기준 생성 완료: {len(plan_base_df)}건")
-
-        progress(84, "계획과 MES 비교 중...")
-        compare_df = compare_plan_mes_with_fifo(plan_df, mes_df, today_actual_df)
-        compare_df = filter_by_period(compare_df, start_date=START_DATE, end_date=END_DATE)
-        progress(92, f"비교 결과 생성 완료: {len(compare_df)}건")
-
-        progress(96, "엑셀 저장 중...")
-        save_results(plan_df, mes_df, plan_base_df, compare_df, OUTPUT_FILE)
+        all_plan_df = extract_plan_all(plan_file, progress=progress)
+        plan_df = filter_by_period(all_plan_df, start_date, end_date)
+        progress(60, "MES 작업지시 정규화 중...")
+        all_mes_df = extract_mes(mes_file)
+        mes_df = filter_by_period(all_mes_df, start_date, end_date)
+        progress(75, "계획과 MES 작업지시 1차 비교 중...")
+        work_order_df = compare_work_orders(all_plan_df, all_mes_df)
+        mismatch_rows = work_order_df[work_order_df["1차판정"] != "작업지시일치"]
+        mismatch_keys = set(mismatch_rows["품번"])
+        progress(82, "불일치 품번의 오늘 미달 실적 흐름 비교 중...")
+        shortage_flow_df = compare_shortage_actual_flow(
+            all_plan_df, all_mes_df, target_keys=mismatch_keys
+        )
+        work_order_df = filter_by_period(work_order_df, start_date, end_date)
+        progress(90, "엑셀 저장 중...")
+        save_normalized_results(
+            plan_df, mes_df, shortage_flow_df, work_order_df, OUTPUT_FILE
+        )
         progress(100, "완료")
         progress_win.destroy()
-        messagebox.showinfo("완료", f"저장 완료: {OUTPUT_FILE}")
-
-    except Exception as e:
+        messagebox.showinfo("완료", f"정규화 데이터 저장 완료: {OUTPUT_FILE}")
+    except Exception as error:
         progress_win.destroy()
-        messagebox.showerror("오류", str(e))
+        messagebox.showerror("오류", str(error))
 
 
 if __name__ == "__main__":

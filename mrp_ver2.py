@@ -75,7 +75,9 @@ def build_processed_core_sheet(file_path, sheet_name, start_date, end_date, actu
     가공본의 첫 날짜 열은 기준일 미달이므로 기간과 무관하게 보존한다.
     나머지 날짜 열에만 사용자가 선택한 기간을 적용한다.
     """
-    raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+    raw = pd.read_excel(
+        file_path, sheet_name=sheet_name, header=None, engine="calamine"
+    )
     date_row_idx = None
     all_date_cols = []
     date_values = {}
@@ -176,7 +178,7 @@ def build_processed_core_sheet(file_path, sheet_name, start_date, end_date, actu
 
 
 def load_actuals_by_process(actual_file):
-    df = pd.read_excel(actual_file)
+    df = pd.read_excel(actual_file, engine="calamine")
     part_col = find_column_by_keywords(df, ("품번",))
     qty_col = find_column_by_keywords(df, ("실적", "수량"))
     process_col = find_column_by_keywords(df, ("공정",))

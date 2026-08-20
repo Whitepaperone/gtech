@@ -95,6 +95,8 @@ def load_calamine_worksheets(plan_file: str, sheet_names) -> Dict[str, CalamineW
     """필요한 생산계획 시트만 calamine으로 읽는다."""
     with pd.ExcelFile(plan_file, engine="calamine") as excel_file:
         selected = [name for name in sheet_names if name in excel_file.sheet_names]
+        if not selected:
+            return {}
         frames = pd.read_excel(excel_file, sheet_name=selected, header=None)
     return {name: CalamineWorksheet(name, frame) for name, frame in frames.items()}
 
@@ -185,17 +187,16 @@ def build_plan_date_columns(ws) -> List[Dict]:
     return cols
 
 
-def build_yesterday_shortage_columns(ws, today=None) -> List[Dict]:
-    """실행일 기준 어제 날짜의 '미달' 열만 반환한다.
+def build_today_shortage_columns(ws, today=None) -> List[Dict]:
+    """실행일 기준 오늘 날짜의 '미달' 열만 반환한다.
 
     생산계획에는 같은 미달 수량이 여러 날짜에 이월 기재되므로 과거 미달을
-    누적하지 않고 가장 최신값인 어제 미달만 사용한다.
+    누적하지 않고 가장 최신값인 오늘 미달만 사용한다.
     """
     base_date = pd.Timestamp(today).normalize() if today is not None else pd.Timestamp.today().normalize()
-    yesterday = base_date - pd.Timedelta(days=1)
     return [
         dc for dc in build_mes_date_columns(ws)
-        if dc["kind"] == "미달" and dc["date"] == yesterday
+        if dc["kind"] == "미달" and dc["date"] == base_date
     ]
 
 
@@ -261,9 +262,9 @@ def extract_finish_plan_sheet(ws, config: Optional[Dict] = None) -> pd.DataFrame
     return _extract_plan_sheet(ws, mode="finish", config=config)
 
 
-def extract_yesterday_shortage_sheet(ws, config: Optional[Dict] = None, today=None) -> pd.DataFrame:
-    """완성공정에서 중복 이월분을 제외한 어제 미달 수량만 추출한다."""
-    date_columns = build_yesterday_shortage_columns(ws, today=today)
+def extract_today_shortage_sheet(ws, config: Optional[Dict] = None, today=None) -> pd.DataFrame:
+    """완성공정에서 중복 이월분을 제외한 오늘 미달 수량만 추출한다."""
+    date_columns = build_today_shortage_columns(ws, today=today)
     if not date_columns:
         return pd.DataFrame()
     return _extract_plan_sheet(
@@ -377,19 +378,6 @@ def pick_plan_part_no(workshop_name: str, row_values: Dict[str, str]) -> str:
         or row_values.get("tank_part_no", "")
         or row_values.get("core_part_no", "")
     )
-
-
-def make_compare_key(process: str, workshop: str, team: str, part_no: str, day) -> str:
-    process = normalize_process_token(process)
-    workshop = normalize_process_token(workshop)
-    team = normalize_process_token(team)
-    part_no = normalize_part_no(part_no)
-    day = pd.to_datetime(day, errors="coerce").normalize()
-
-    if process == "완성" and "액세" in workshop:
-        return f"{process}|{part_no}|{day}"
-
-    return f"{process}|{workshop}|{team}|{part_no}|{day}"
 
 
 def extract_plan_sheet(ws, config: Dict, check_red_font: bool = False, progress=None) -> pd.DataFrame:
@@ -742,7 +730,12 @@ def _extract_plan_sheet(
                 continue
 
             qty_num = safe_float(qty)
-            if qty_num == 0:
+            keep_today_zero_shortage = (
+                is_mes
+                and dc["kind"] == "미달"
+                and dc["date"] == pd.Timestamp.today().normalize()
+            )
+            if qty_num == 0 and not keep_today_zero_shortage:
                 continue
 
             # 재고 읽기 (행 단위)
@@ -759,7 +752,6 @@ def _extract_plan_sheet(
                 part_norm = normalize_part_no(part_no)
 
                 records.append({
-                    "비교키": make_compare_key(process, workshop, team, part_norm, dc["date"]),
                     "시트명": ws.title,
                     "공정": process,
                     "작업장명": workshop_raw,
@@ -796,13 +788,13 @@ def _extract_plan_sheet(
 
 
 def extract_plan_file(plan_file: str, progress=None) -> pd.DataFrame:
-    wb = load_workbook(plan_file, data_only=True)
+    worksheets = load_calamine_worksheets(plan_file, SHEET_NAME)
 
     frames = []
 
     total = len(SHEET_NAME)
     for i, sheet_name in enumerate(SHEET_NAME, start=1):
-        if sheet_name not in wb.sheetnames:
+        if sheet_name not in worksheets:
             if progress:
                 progress(10 + int(i / total * 70), f"{sheet_name} 시트 없음, 건너뜀")
             continue
@@ -810,7 +802,7 @@ def extract_plan_file(plan_file: str, progress=None) -> pd.DataFrame:
         if progress:
             progress(10 + int((i - 1) / total * 70), f"{sheet_name} 계획 추출 중...")
 
-        ws = wb[sheet_name]
+        ws = worksheets[sheet_name]
         df = extract_finish_plan_sheet(ws)
 
         if progress:
@@ -842,11 +834,11 @@ def extract_core_tube_from_ws(ws, asof_date=None, start_date=None, end_date=None
     if start_col is None:
         raise RuntimeError(f"{ws.title}: 날짜 시작 열을 찾지 못했습니다.")
 
-    # 계획 열과 최신 이월값인 어제 미달 열만 함께 읽는다.
+    # 계획 열과 최신 이월값인 오늘 미달 열만 함께 읽는다.
     # 미달은 계획 수량과 섞지 않고 아래에서 별도로 집계한다.
     asof_calc = asof_date or (start_date if start_date is not None else None)
     date_cols = [dc for dc in build_mes_date_columns(ws) if dc["kind"] == "계획"]
-    date_cols.extend(build_yesterday_shortage_columns(ws))
+    date_cols.extend(build_today_shortage_columns(ws))
     if not date_cols:
         raise RuntimeError(f"{ws.title}: 날짜 컬럼을 찾지 못했습니다.")
 
@@ -1057,12 +1049,15 @@ def export_core_tube_requirements(plan_file: str, asof_date_str: str = None, sta
     asof_date = pd.to_datetime(asof_date_str).date() if asof_date_str else None
     start_date = pd.to_datetime(start_date_str).normalize().date() if start_date_str else None
     end_date = pd.to_datetime(end_date_str).normalize().date() if end_date_str else None
-    wb = load_workbook(plan_file, data_only=True)
     sheet_name = "CORE공정(실적)"
-    if sheet_name not in wb.sheetnames:
+    worksheets = load_calamine_worksheets(plan_file, [sheet_name])
+    if sheet_name not in worksheets:
         raise RuntimeError(f"{sheet_name} 시트가 없습니다: {plan_file}")
 
-    header_df, tube_df = extract_core_tube_from_ws(wb[sheet_name], asof_date=asof_date, start_date=start_date, end_date=end_date, progress=progress)
+    header_df, tube_df = extract_core_tube_from_ws(
+        worksheets[sheet_name], asof_date=asof_date,
+        start_date=start_date, end_date=end_date, progress=progress,
+    )
     out = output_file or CORE_TUBE_OUTPUT_FILE
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         header_df.to_excel(writer, sheet_name="헤더소요량", index=False)

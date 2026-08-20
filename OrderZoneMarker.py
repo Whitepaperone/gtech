@@ -29,6 +29,7 @@ from ExtractPlan import (
     build_header_lookup,
     find_date_start_col,
     is_skip_summary_row,
+    load_calamine_worksheets,
     should_skip_row,
     starts_with_alpha_part_no,
 )
@@ -146,19 +147,20 @@ def parse_sheet_records(ws, start_date) -> list[dict]:
 
 
 def parse_plan_records(plan_file: str, start_date, progress=None) -> pd.DataFrame:
-    """값 계산용 workbook은 data_only=True로 열어 수식 결과값을 읽는다."""
+    """계산용 첫 시트를 calamine으로 빠르게 읽는다."""
     if progress:
         progress(10, "계산용 엑셀 값을 읽는 중...")
 
-    workbook = load_workbook(plan_file, data_only=True)
+    with pd.ExcelFile(plan_file, engine="calamine") as excel_file:
+        sheet_names = excel_file.sheet_names[:1]
+    worksheets = load_calamine_worksheets(plan_file, sheet_names)
     records = []
-    sheet_names = workbook.sheetnames[:1]
     total = max(len(sheet_names), 1)
 
     for index, sheet_name in enumerate(sheet_names, start=1):
         if progress:
             progress(10 + int((index - 1) / total * 35), f"{sheet_name} 파싱 중...")
-        records.extend(parse_sheet_records(workbook[sheet_name], start_date))
+        records.extend(parse_sheet_records(worksheets[sheet_name], start_date))
         if progress:
             progress(10 + int(index / total * 35), f"{sheet_name} 파싱 완료")
 

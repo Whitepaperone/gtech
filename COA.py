@@ -4,7 +4,6 @@ import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
 import pandas as pd
-from openpyxl import load_workbook
 
 from AppConstants import COA_EXCLUDE_CUSTOMERS, FINISH_PLAN_SHEET_NAMES, STOCK_COL
 from CommonUtils import (
@@ -15,7 +14,8 @@ from CommonUtils import (
 )
 from ExtractPlan import (
     extract_finish_plan_sheet as extract_finish_plan_sheet_from_module,
-    extract_yesterday_shortage_sheet,
+    extract_today_shortage_sheet,
+    load_calamine_worksheets,
 )
 
 
@@ -43,7 +43,7 @@ def extract_plan_file(plan_file: str, progress=None, extract_stock: bool = False
     if progress:
         progress(0, "생산계획 파일 열기 중...")
     
-    wb = load_workbook(plan_file, data_only=True)
+    worksheets = load_calamine_worksheets(plan_file, SHEET_NAME)
     if progress:
             progress(35, "생산계획 파일 열기 완료")
     frames = []
@@ -51,26 +51,26 @@ def extract_plan_file(plan_file: str, progress=None, extract_stock: bool = False
     total = len(SHEET_NAME)
 
     for i, sheet_name in enumerate(SHEET_NAME, start=1):
-        if sheet_name not in wb.sheetnames:
+        if sheet_name not in worksheets:
             if progress:
                 progress(35 + int(i / total * 50), f"{sheet_name} 시트 없음, 건너뜀")
             continue
         if progress:
             progress(35 + int((i - 1) / total * 50), f"{sheet_name} 추출 중...")
 
-        ws = wb[sheet_name]
+        ws = worksheets[sheet_name]
         config = {"extract_stock": True, "stock_col": STOCK_COL} if extract_stock else None
         df = extract_finish_plan_sheet_from_module(ws, config=config)
-        yesterday_shortage_df = extract_yesterday_shortage_sheet(ws, config=config)
-        if not yesterday_shortage_df.empty:
+        today_shortage_df = extract_today_shortage_sheet(ws, config=config)
+        if not today_shortage_df.empty:
             # 음수 미달은 선생산되어 AD열 재고에 이미 반영된 수량이므로
             # COA의 가용 생산계획에는 다시 넣지 않는다.
-            yesterday_shortage_df = yesterday_shortage_df[
-                pd.to_numeric(yesterday_shortage_df["계획수량"], errors="coerce").fillna(0) > 0
+            today_shortage_df = today_shortage_df[
+                pd.to_numeric(today_shortage_df["계획수량"], errors="coerce").fillna(0) > 0
             ].copy()
-            df = pd.concat([df, yesterday_shortage_df], ignore_index=True, sort=False)
+            df = pd.concat([df, today_shortage_df], ignore_index=True, sort=False)
 
-        # 일반 계획은 오늘부터 마지막 계획일까지 모두 사용한다. 어제 미달분은
+        # 일반 계획은 오늘부터 마지막 계획일까지 모두 사용한다. 오늘 미달분은
         # 별도 이월 계획이므로 위에서 선별한 양수 행만 그대로 유지한다.
         if not df.empty:
             plan_dates = pd.to_datetime(df["날짜"], errors="coerce").dt.normalize()
