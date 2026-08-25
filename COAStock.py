@@ -11,7 +11,7 @@ from openpyxl.styles import Alignment, Border, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from AppConstants import COA_STOCK_CONFIG
-from COA import apply_part_mapping, extract_order_file
+from COA import apply_part_mapping, fetch_orders_from_api
 from CommonUtils import (
     create_progress_window,
     normalize_part_no,
@@ -444,14 +444,6 @@ def main():
         messagebox.showinfo("알림", "생산계획 파일을 선택하지 않았습니다.")
         return
 
-    order_file = filedialog.askopenfilename(
-        title="수주 엑셀 선택",
-        filetypes=[("Excel files", "*.xlsx *.xlsm *.xls")],
-    )
-    if not order_file:
-        messagebox.showinfo("알림", "수주 파일을 선택하지 않았습니다.")
-        return
-
     if DEFAULT_MAPPING_FILE.is_file():
         mapping_file = str(DEFAULT_MAPPING_FILE)
         mapping_source = "공용서버 자동 연결"
@@ -472,14 +464,14 @@ def main():
             mapping_file = None
             mapping_source = "사용 안 함"
 
-    save_file = select_excel_save_file("결과 파일 저장", order_file, "수주잔량_재고현황", root)
+    save_file = select_excel_save_file("결과 파일 저장", plan_file, "수주잔량_재고현황", root)
     if not save_file:
         return
 
     progress_win, progress = create_progress_window(root, "수주잔량과 재고 비교")
     try:
-        progress(10, "수주 파일 읽는 중...")
-        order_df = extract_order_file(order_file)
+        progress(10, "서버에서 수주 데이터 받는 중...")
+        order_df = fetch_orders_from_api()
 
         progress(20, "품번 매핑 적용 중...")
         order_df = apply_part_mapping(order_df, mapping_file)

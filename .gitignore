@@ -6,6 +6,8 @@ excel_watch/
 *.spec
 *.db
 *.fdb
+AppConstants.py
+app_config.json
 
 # Firebird DB files (local COA DB and copies)
 Data/*.fdb

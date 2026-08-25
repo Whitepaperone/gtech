@@ -5,6 +5,7 @@ from tkinter import filedialog
 from pathlib import Path
 import pandas as pd
 
+from ApiClient import fetch_orders
 from AppConstants import COA_EXCLUDE_CUSTOMERS, FINISH_PLAN_SHEET_NAMES, STOCK_COL
 from CommonUtils import (
     create_progress_window,
@@ -162,6 +163,47 @@ def extract_order_file(order_file: str) -> pd.DataFrame:
     df = df[df["납기"].notna() | ignore_due_date].copy()
 
     return df
+
+
+def fetch_orders_from_api(base_url: str = None, timeout: float = None) -> pd.DataFrame:
+    """수주 API 응답을 기존 COA 엑셀과 동일한 컬럼 구조로 변환한다."""
+    records = fetch_orders(base_url=base_url, timeout=timeout)
+
+    api_columns = {
+        "SO_CODE": "수주번호",
+        "ORDER_DATE": "날짜",
+        "DUE_DATE": "납기",
+        "CUSTOMER_NAME": "출고(고객)사",
+        "ITEM_CODE": "품번",
+        "ITEM_NAME": "품명",
+        "ITEM_DESCRIPTION": "규격",
+        "ORDER_QTY": "수량",
+        "PROCESSED_QTY": "할당수량",
+        "REMAIN_QTY": "잔여량",
+        "REMARK": "비고",
+    }
+    df = pd.DataFrame(records).reindex(columns=api_columns).rename(columns=api_columns)
+    for col in ["수주번호", "출고(고객)사", "품명", "규격", "비고"]:
+        df[col] = df[col].fillna("")
+
+    df = df[
+        ~df["출고(고객)사"].apply(lambda x: normalize_process_token(x) in EXCLUDE_CUSTOMERS)
+    ].copy()
+    df["품번"] = df["품번"].apply(normalize_part_no)
+    for col in ["날짜", "납기"]:
+        # API의 UTC 날짜(예: 전날 15:00Z)를 한국 현지 날짜로 복원한다.
+        df[col] = (
+            pd.to_datetime(df[col], errors="coerce", utc=True)
+            .dt.tz_convert("Asia/Seoul")
+            .dt.tz_localize(None)
+            .dt.normalize()
+        )
+    for col in ["수량", "할당수량", "잔여량"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    df = df[(df["잔여량"] > 0) & (df["품번"] != "")].copy()
+    ignore_due_date = df.apply(is_due_date_ignored_order, axis=1)
+    return df[df["납기"].notna() | ignore_due_date].copy()
 
 
 # =========================
@@ -405,15 +447,6 @@ def main():
         messagebox.showinfo("알림", "생산계획 파일을 선택하지 않았습니다.")
         return
 
-    order_file = filedialog.askopenfilename(
-        title="수주 엑셀 선택",
-        filetypes=[("Excel files", "*.xlsx *.xlsm *.xls")]
-    )
-
-    if not order_file:
-        messagebox.showinfo("알림", "수주 파일을 선택하지 않았습니다.")
-        return
-
     if DEFAULT_MAPPING_FILE.is_file():
         mapping_file = str(DEFAULT_MAPPING_FILE)
     else:
@@ -440,8 +473,8 @@ def main():
     progress_win, progress = create_progress_window(root, "COA 수주잔량 비교 진행")
 
     try:
-        progress(10, "수주 파일 읽는 중...")
-        order_df = extract_order_file(order_file)
+        progress(10, "서버에서 수주 데이터 받는 중...")
+        order_df = fetch_orders_from_api()
 
         progress(20, "품번 매핑 적용 중...")
         order_df = apply_part_mapping(order_df, mapping_file)
