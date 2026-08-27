@@ -4,6 +4,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from tkinter import Tk, filedialog, messagebox
 from datetime import datetime
 from CommonUtils import create_progress_window
+from AppConstants import BOM_CONFIG
 
 # =========================
 # 설정값
@@ -19,8 +20,8 @@ ADJ_QTY_COL = "전산수량"
 SUP_PART_COL = "품번(코드)"
 SUP_NAME_COL = "거래처명"
 
-PLAN_PART_COL_INDEX = 5     # F열
-PLAN_QTY_COL_INDEX = 52     # BA열
+PLAN_PART_COL_INDEX = int(BOM_CONFIG["plan_part_col_index"])  # F열 (0-based)
+PLAN_QTY_COL_INDEX = int(BOM_CONFIG["plan_qty_col_index"])    # BD열 (0-based)
 
 HIGHLIGHT_COL = "__BOM_HIGHLIGHT__"
 HIGHLIGHT_PLAN = "plan"
@@ -51,7 +52,7 @@ def read_plan_file(plan_file):
         plan_file,
         sheet_name="완성공정(실적)",
         header=None,
-        usecols=[5, 52],   # F, BA
+        usecols=[PLAN_PART_COL_INDEX, PLAN_QTY_COL_INDEX],
         skiprows=35,
         engine="calamine"
     )

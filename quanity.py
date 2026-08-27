@@ -5,7 +5,7 @@ from tkinter import filedialog
 INPUT_FILE = filedialog.askopenfilename(title="엑셀 파일 선택", filetypes=[("Excel files", "*.xlsx *.xls")])
 OUTPUT_FILE = "./output.xlsx"
 
-EXCLUDE_PROCESS = ["BRAZING", "Leak Test", "가열로", "출하-액세사리"]
+EXCLUDE_PROCESS = ["BRAZING", "Leak Test", "가열로", "출하-액세사리", "CORE부품"]
 
 def get_merged_value(ws, cell):
     for merged in ws.merged_cells.ranges:

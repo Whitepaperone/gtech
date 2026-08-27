@@ -170,7 +170,7 @@ def build_processed_core_sheet(file_path, sheet_name, start_date, end_date, actu
         labels.append(label if seen[label] == 1 else f"{label}_{seen[label]}")
     result = result.rename(columns=dict(zip(internal_dates, labels)))
     total = {col: "" for col in result.columns}
-    total["품번"] = "합계"
+    total["품번"] = ""
     for col in labels + ["합계"]:
         total[col] = result[col].sum()
     return pd.concat([result, pd.DataFrame([total])], ignore_index=True)
@@ -269,7 +269,7 @@ def build_mrp_sheet(extracted, start_date, end_date, actuals):
     result = result.rename(columns={c: c.strftime("%Y/%m/%d") for c in date_cols})
 
     total = {col: "" for col in result.columns}
-    total["품번"] = "합계"
+    total["품번"] = ""
     for col in [c.strftime("%Y/%m/%d") for c in date_cols] + ["합계"]:
         total[col] = result[col].sum()
     return pd.concat([result, pd.DataFrame([total])], ignore_index=True)

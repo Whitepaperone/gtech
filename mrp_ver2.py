@@ -144,7 +144,7 @@ def build_mrp_sheet(extracted, start_date, end_date, actuals):
     result = result.rename(columns={c: c.strftime("%Y/%m/%d") for c in date_cols})
 
     total = {col: "" for col in result.columns}
-    total["품번"] = "합계"
+    total["품번"] = ""
     for col in [c.strftime("%Y/%m/%d") for c in date_cols] + ["합계"]:
         total[col] = result[col].sum()
     return pd.concat([result, pd.DataFrame([total])], ignore_index=True)
@@ -255,8 +255,10 @@ def write_result(output_path, sheets):
             and ws.max_column >= 5
             and ws.cell(1, ws.max_column).value == "합계"
         ):
-            total_row = ws.max_row if ws.cell(ws.max_row, 1).value == "합계" else None
-            data_end_row = total_row - 1 if total_row else ws.max_row
+            # MRP 결과는 마지막 행이 합계 행이다. 품번 칸은 비워 두어
+            # 후속 처리에서 "합계"가 품번으로 인식되지 않게 한다.
+            total_row = ws.max_row
+            data_end_row = total_row - 1
             total_col = ws.max_column
             first_date_col = 4
             last_date_col = total_col - 1
