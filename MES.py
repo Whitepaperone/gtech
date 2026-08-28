@@ -15,6 +15,7 @@ from ExtractPlan import load_calamine_worksheets
 
 OUTPUT_FILE = MES_OUTPUT_FILE
 SHEET_CONFIG = MES_SHEET_CONFIG
+EXCLUDED_MES_WORKSHOPS = {"CORE부품"}
 
 
 def canonical_workshop_name(name: str) -> str:
@@ -61,6 +62,7 @@ def extract_mes(mes_file: str) -> pd.DataFrame:
     df = df[needed].copy()
     df["작업장명"] = df["작업장명"].fillna("").astype(str).str.strip()
     df["작업반명"] = df["작업반명"].fillna("").astype(str).str.strip()
+    df = df[~df["작업장명"].isin(EXCLUDED_MES_WORKSHOPS)].copy()
     df["공정"] = df["작업장명"].map(canonical_workshop_name).map(map_process_from_workshop)
     df = df[df["공정"].notna() & (df["작업지시상태"] != "종료")].copy()
     df["날짜"] = pd.to_datetime(df["계획일"], errors="coerce").dt.normalize()

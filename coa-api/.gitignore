@@ -1,0 +1,8 @@
+node_modules/
+.env
+.env.*
+!.env.example
+data/snapshots/*.json
+shipment_snapshots/*.json
+npm-debug.log*
+

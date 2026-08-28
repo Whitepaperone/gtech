@@ -56,7 +56,7 @@ CHANGE_FILLS = {
 }
 PRESALE_COLOR = "FCE4D6"  # Excel: 주황, 강조 6, 80% 더 밝게
 PRESALE_FILL = PatternFill("solid", fgColor=PRESALE_COLOR)
-EXCLUDED_UNIT_CATEGORIES = {"소모품", "상품", "제관품", "기타"}
+EXCLUDED_UNIT_CATEGORIES = {"소모품", "상품", "제관품", "기타", "부재료"}
 DEFAULT_MAPPING_FILE = Path(
     r"\\Data-server\01. 공유문서\08.생산계획\생산계획\MES 생산계획 업로딩용"
     r"\프로그램\4. 품번매핑.xlsx"
@@ -190,12 +190,6 @@ def _comparable(value) -> str:
     return normalize_process_token(value)
 
 
-def _split_base_type(value) -> tuple[str, str]:
-    """SO_15188을 입력방법 SO와 근거번호 15188로 분리한다."""
-    text = str(value or "").strip()
-    if "_" not in text:
-        return text, ""
-    return tuple(text.split("_", 1))
 
 
 def _is_presale(record: dict) -> bool:
@@ -337,9 +331,8 @@ def append_shipment_changes(
                     value = 0
                 ws.cell(target_row, header_columns[header], value)
 
-            input_method, base_number = _split_base_type(record.get("BASETYPE"))
-            ws.cell(target_row, header_columns["입력방법"], input_method)
-            ws.cell(target_row, header_columns["근거번호"], base_number)
+            ws.cell(target_row, header_columns["입력방법"], record.get("BASETYPE"),)
+            ws.cell(target_row, header_columns["근거번호"], record.get("SALESCODE"))
             return_value = record.get("RSQTY") if presale else record.get("RETURNQTY")
             return_cell = ws.cell(target_row, header_columns["반품/선매출고"], return_value)
 
@@ -541,7 +534,9 @@ def append_shipment_changes_fast(
                     value = 0
                 row_values[header_columns[header] - 1] = value
             input_method, base_number = _split_base_type(record.get("BASETYPE"))
-            row_values[header_columns["입력방법"] - 1] = input_method
+            row_values[header_columns["입력방법"] - 1] = _combined_input_method(
+                input_method, base_number
+            )
             row_values[header_columns["근거번호"] - 1] = base_number
             row_values[header_columns["반품/선매출고"] - 1] = (
                 record.get("RSQTY") if presale else record.get("RETURNQTY")

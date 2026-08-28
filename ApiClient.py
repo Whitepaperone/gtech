@@ -2,10 +2,25 @@
 """서버 API 호출과 공통 응답 검증을 담당하는 모듈."""
 
 import json
+import os
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from AppConstants import API_BASE_URL, ORDERS_API_TIMEOUT_SECONDS
+
+
+API_KEY_ENV_NAME = "COA_API_KEY"
+
+
+def _get_api_key() -> str:
+    """Return the API key configured on the PC running this program."""
+    api_key = str(os.getenv(API_KEY_ENV_NAME) or "").strip()
+    if not api_key:
+        raise RuntimeError(
+            f"{API_KEY_ENV_NAME} 환경변수가 설정되지 않았습니다. "
+            "Windows 환경변수에 API Key를 등록한 후 프로그램을 다시 실행해 주세요."
+        )
+    return api_key
 
 
 def fetch_json(url: str, timeout: float = 30) -> dict:
@@ -16,12 +31,22 @@ def fetch_json(url: str, timeout: float = 30) -> dict:
     if not url.lower().startswith(("http://", "https://")):
         url = f"http://{url}"
 
-    request = Request(url, headers={"Accept": "application/json"})
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {_get_api_key()}",
+        },
+    )
     try:
         with urlopen(request, timeout=timeout) as response:
             charset = response.headers.get_content_charset() or "utf-8"
             payload = json.loads(response.read().decode(charset))
     except HTTPError as exc:
+        if exc.code == 401:
+            raise RuntimeError(
+                "API 인증에 실패했습니다. COA_API_KEY가 서버의 API_KEY와 같은지 확인해 주세요."
+            ) from exc
         raise RuntimeError(f"API 호출 실패: HTTP {exc.code} ({url})") from exc
     except URLError as exc:
         reason = getattr(exc, "reason", exc)
