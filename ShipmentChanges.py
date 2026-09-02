@@ -219,7 +219,7 @@ def find_existing_change_row(
     original_part = normalize_part_no(original("ITEMCODE"))
     expected = {
         "출고번호": _comparable(original("SALESCODE")),
-        "근거번호": _comparable(_split_base_type(original("BASETYPE"))[1]),
+        "근거번호": _comparable(original("BASETYPE")[1]),
         "품번": _comparable(part_mapping.get(original_part, original_part)),
         "날짜": _comparable(original("DDAY")),
         "수량": _comparable(original("QTY")),
@@ -468,7 +468,7 @@ def append_shipment_changes_fast(
             part = normalize_part_no(original("ITEMCODE"))
             expected = {
                 "출고번호": _comparable(original("SALESCODE")),
-                "근거번호": _comparable(_split_base_type(original("BASETYPE"))[1]),
+                "근거번호": _comparable(original("BASETYPE")[1]),
                 "품번": _comparable(part_mapping.get(part, part)),
                 "날짜": _comparable(original("DDAY")),
                 "수량": _comparable(original("QTY")),
@@ -533,11 +533,8 @@ def append_shipment_changes_fast(
                 elif header == "출고량" and presale:
                     value = 0
                 row_values[header_columns[header] - 1] = value
-            input_method, base_number = _split_base_type(record.get("BASETYPE"))
-            row_values[header_columns["입력방법"] - 1] = _combined_input_method(
-                input_method, base_number
-            )
-            row_values[header_columns["근거번호"] - 1] = base_number
+            row_values[header_columns["입력방법"] - 1] = record.get("BASETYPE")
+            row_values[header_columns["근거번호"] - 1] = record.get("SALESCODE")
             row_values[header_columns["반품/선매출고"] - 1] = (
                 record.get("RSQTY") if presale else record.get("RETURNQTY")
             )

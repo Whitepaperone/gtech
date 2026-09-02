@@ -50,6 +50,9 @@ RAW_MATERIAL_SUPPLIERS = {
 }
 INHOUSE_RAW_MATERIAL_NAMES = {"PLATE", "TUBE"}
 INHOUSE_RAW_MATERIAL_PREFIXES = ("FIN",)
+FIXED_PART_VALUES = {
+    "NZ000030": (0.01, "ROLL"),
+}
 
 
 @dataclass
@@ -76,7 +79,17 @@ def numeric_level(item: ChangeListItem) -> int | None:
 
 
 def unit_for_part(part_number: str) -> str:
-    return "kg" if str(part_number or "").strip().upper().startswith("J") else "EA"
+    normalized_part = normalize_part_lookup(part_number)
+    if normalized_part in FIXED_PART_VALUES:
+        return FIXED_PART_VALUES[normalized_part][1]
+    return "kg" if normalized_part.startswith("J") else "EA"
+
+
+def quantity_for_part(part_number: str, quantity: Any) -> float:
+    normalized_part = normalize_part_lookup(part_number)
+    if normalized_part in FIXED_PART_VALUES:
+        return FIXED_PART_VALUES[normalized_part][0]
+    return float(quantity or 0)
 
 
 def normalize_supplier_name(value: str) -> str:
@@ -219,7 +232,7 @@ def build_bom_upload_rows(
         if level != 1 and not should_keep_changed_row(normalized_path, changed_paths):
             continue
 
-        quantity = float(item.quantity or 0)
+        quantity = quantity_for_part(child_part, item.quantity)
         child_lookup = normalize_part_lookup(child_part)
         row = BomUploadRow(
             parent_part=path_parts[-2],

@@ -4,9 +4,15 @@ import tkinter as tk
 from tkinter import filedialog
 from pathlib import Path
 import pandas as pd
+from openpyxl.utils import column_index_from_string
 
 from ApiClient import fetch_orders
-from AppConstants import COA_EXCLUDE_CUSTOMERS, FINISH_PLAN_SHEET_NAMES, STOCK_COL
+from AppConstants import (
+    COA_EXCLUDE_CUSTOMERS,
+    DATA_START_ROW,
+    FINISH_PLAN_SHEET_NAMES,
+    PLAN_SHEET_CONFIG,
+)
 from CommonUtils import (
     create_progress_window,
     normalize_part_no,
@@ -60,7 +66,10 @@ def extract_plan_file(plan_file: str, progress=None, extract_stock: bool = False
             progress(35 + int((i - 1) / total * 50), f"{sheet_name} 추출 중...")
 
         ws = worksheets[sheet_name]
-        config = {"extract_stock": True, "stock_col": STOCK_COL} if extract_stock else None
+        sheet_config = PLAN_SHEET_CONFIG[sheet_name]
+        part_col = column_index_from_string(str(sheet_config["part_col"]).upper())
+        stock_col = column_index_from_string(str(sheet_config["stock_col"]).upper())
+        config = {"extract_stock": True, "stock_col": stock_col} if extract_stock else None
         df = extract_finish_plan_sheet_from_module(ws, config=config)
         today_shortage_df = extract_today_shortage_sheet(ws, config=config)
         if not today_shortage_df.empty:
@@ -82,9 +91,14 @@ def extract_plan_file(plan_file: str, progress=None, extract_stock: bool = False
         # 계획이 0인 품번도 재고로 수주를 충당할 수 있으므로 F/AD열은 별도로 읽는다.
         if extract_stock:
             for stock_row in ws.iter_rows(
-                min_row=35, min_col=6, max_col=STOCK_COL, values_only=True
+                min_row=DATA_START_ROW,
+                min_col=min(part_col, stock_col),
+                max_col=max(part_col, stock_col),
+                values_only=True,
             ):
-                part_value, stock_value = stock_row[0], stock_row[-1]
+                first_col = min(part_col, stock_col)
+                part_value = stock_row[part_col - first_col]
+                stock_value = stock_row[stock_col - first_col]
                 part_no = normalize_part_no(part_value)
                 stock_number = pd.to_numeric(stock_value, errors="coerce")
                 if part_no and pd.notna(stock_number):

@@ -1,7 +1,6 @@
 from typing import Optional, List, Dict
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from tkcalendar import Calendar
 import pandas as pd
 from openpyxl import load_workbook
 import datetime
@@ -14,6 +13,7 @@ from AppConstants import (
     HEADER_KIND_ROW,
     MES_SHEET_CONFIG,
     PLAN_OUTPUT_FILE,
+    PLAN_SHEET_CONFIG,
     PLAN_SHEET_NAMES,
     WORKSHOP_TO_PROCESS,
     EXTRACT_STOCK,
@@ -105,7 +105,6 @@ def load_calamine_worksheets(plan_file: str, sheet_names) -> Dict[str, CalamineW
 # =========================
 SHEET_NAME = PLAN_SHEET_NAMES
 OUTPUT_FILE = PLAN_OUTPUT_FILE
-
 
 # =========================
 # 열 찾기
@@ -252,6 +251,129 @@ def starts_with_alpha_part_no(part_no) -> bool:
 # =========================
 # 생산계획 추출
 # =========================
+def extract_stock_by_part(plan_file: str) -> pd.DataFrame:
+    """생산계획 세 공정 시트에서 품번별 재고수량만 추출한다.
+
+    같은 품번이 반복되거나 여러 공정 시트에 있으면 재고수량을 모두 합산한다.
+    """
+    sheet_config = PLAN_SHEET_CONFIG
+    worksheets = load_calamine_worksheets(plan_file, sheet_config)
+    missing_sheets = [name for name in sheet_config if name not in worksheets]
+    if missing_sheets:
+        raise RuntimeError("생산계획에 필수 시트가 없습니다: " + ", ".join(missing_sheets))
+
+    records = []
+    for sheet_name, columns in sheet_config.items():
+        ws = worksheets[sheet_name]
+        header_cols = build_header_lookup(ws)
+        merged_map = build_merged_map(ws)
+        part_col = _col_letter_to_index(str(columns["part_col"]))
+        stock_col = _col_letter_to_index(str(columns["stock_col"]))
+        model_col = header_cols["model_col"]
+        customer_part_col = header_cols["customer_part_col"]
+        process_print_col = header_cols["process_print_col"]
+        current_model = ""
+        accessory_mode = False
+
+        for row_cells in ws.iter_rows(min_row=DATA_START_ROW, max_row=ws.max_row):
+            row_no = row_cells[0].row
+            values = [cell.value for cell in row_cells]
+
+            model_value = normalize_process_token(values[model_col - 1])
+            if model_value:
+                current_model = model_value
+
+            row_text = " ".join(
+                text
+                for text in (normalize_process_token(value) for value in values)
+                if text
+            )
+            first_col_text = normalize_process_token(
+                merged_map.get((row_no, 1), values[0])
+            )
+
+            row_text_norm = normalize_process_token(row_text)
+            if "액세" in row_text_norm and "HEATSCREEN" in row_text_norm:
+                accessory_mode = True
+                continue
+            # 재고 추출(stock 모드)은 액세서리 구간의 '제외' 행도 포함하고,
+            # 액세서리 표 다음 B열의 '합계' 행에서만 추출을 종료한다.
+            second_col_text = normalize_process_token(values[1]) if len(values) > 1 else ""
+            if accessory_mode and "합계" in second_col_text:
+                break
+            # 계획/MES 추출의 기존 액세서리 종료 규칙은 _extract_plan_sheet에 유지한다.
+            if not accessory_mode and "제외" in first_col_text:
+                continue
+
+            part_no = (
+                values[part_col - 1]
+                if part_col <= len(values)
+                else None
+            )
+            stock_value = values[stock_col - 1] if stock_col <= len(values) else None
+            process_name = (
+                normalize_process_token(values[process_print_col - 1])
+                if process_print_col else ""
+            )
+            product_key = (
+                values[customer_part_col - 1] if customer_part_col else part_no
+            )
+
+            # ExtractPlan의 계획 행 필터와 동일한 조건으로 재고 품번도 거른다.
+            if sheet_name == "완성공정(실적)" and any(
+                marker in first_col_text
+                for marker in ("용접C/M", "코어C/M", "선발주-용접C/M")
+            ):
+                if "-반" not in normalize_process_token(part_no):
+                    continue
+            if sheet_name == "TANK공정(실적)" and first_col_text.startswith("코어C/M"):
+                continue
+            if should_skip_row(
+                part_no,
+                process_name,
+                row_text,
+                sheet_title=sheet_name,
+                product_key=product_key,
+            ):
+                continue
+            if is_skip_summary_row(current_model, part_no, row_text):
+                continue
+            if not current_model or not part_no or not starts_with_alpha_part_no(part_no):
+                continue
+
+            part_norm = normalize_part_no(part_no)
+            stock_num = pd.to_numeric(
+                str(stock_value).replace(",", "") if stock_value is not None else None,
+                errors="coerce",
+            )
+            if part_norm and pd.notna(stock_num):
+                process_name = (
+                    "악세서리"
+                    if accessory_mode
+                    else {
+                        "완성공정(실적)": "완성",
+                        "TANK공정(실적)": "TANK",
+                        "CORE공정(실적)": "코어",
+                    }.get(sheet_name, sheet_name.replace("공정(실적)", ""))
+                )
+                records.append({
+                    "공정구분": process_name,
+                    "품번": part_norm,
+                    "생산계획재고수": stock_num,
+                })
+
+    if not records:
+        return pd.DataFrame(columns=["공정구분", "품번", "생산계획재고수"])
+
+    stock = pd.DataFrame.from_records(records)
+    return (
+        stock.groupby(["공정구분", "품번"], as_index=False)["생산계획재고수"]
+        .sum()
+        .sort_values(["공정구분", "품번"], kind="stable")
+        .reset_index(drop=True)
+    )
+
+
 def extract_finish_plan_sheet(ws, config: Optional[Dict] = None) -> pd.DataFrame:
     """완성공정 계획을 추출한다.
 
@@ -385,6 +507,8 @@ def extract_plan_sheet(ws, config: Dict, check_red_font: bool = False, progress=
 
 
 def select_date_range(parent):
+    from tkcalendar import Calendar
+
     win = tk.Toplevel(parent)
     win.title("기간 선택")
     win.geometry("620x330")

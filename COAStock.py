@@ -10,7 +10,7 @@ import pandas as pd
 from openpyxl.styles import Alignment, Border, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from AppConstants import COA_STOCK_CONFIG
+from AppConstants import DATA_START_ROW, FINISH_PLAN_SHEET_NAMES, PLAN_SHEET_CONFIG
 from COA import apply_part_mapping, fetch_orders_from_api
 from CommonUtils import (
     create_progress_window,
@@ -103,10 +103,7 @@ def extract_stock_file_fast(plan_file: str, progress=None) -> pd.DataFrame:
     if path.suffix.lower() not in {".xlsx", ".xlsm"}:
         raise RuntimeError("빠른 재고 추출은 .xlsx 또는 .xlsm 생산계획 파일만 지원합니다.")
 
-    sheet_names = COA_STOCK_CONFIG.get("sheet_names", ["완성공정(실적)"])
-    part_col = str(COA_STOCK_CONFIG.get("part_col", "F")).upper()
-    stock_col = str(COA_STOCK_CONFIG.get("stock_col", "AD")).upper()
-    start_row = int(COA_STOCK_CONFIG.get("data_start_row", 35))
+    sheet_names = FINISH_PLAN_SHEET_NAMES
     cell_ref_pattern = re.compile(r"([A-Z]+)\d+")
     records = []
 
@@ -122,13 +119,16 @@ def extract_stock_file_fast(plan_file: str, progress=None) -> pd.DataFrame:
             sheet_path = worksheet_paths.get(sheet_name)
             if not sheet_path:
                 continue
+            sheet_config = PLAN_SHEET_CONFIG[sheet_name]
+            part_col = str(sheet_config["part_col"]).upper()
+            stock_col = str(sheet_config["stock_col"]).upper()
             found_sheet = True
             with book.open(sheet_path) as source:
                 for event, row in ET.iterparse(source, events=("end",)):
                     if row.tag != f"{{{MAIN_NS}}}row":
                         continue
                     row_number = int(row.attrib.get("r", "0"))
-                    if row_number >= start_row:
+                    if row_number >= DATA_START_ROW:
                         part_value = None
                         stock_value = None
                         for cell in row.findall(f"{{{MAIN_NS}}}c"):

@@ -20,6 +20,7 @@ from ERPComparatorChangeList import (
     append_raw_material_placeholder,
     needs_inhouse_raw_material_placeholder,
     needs_raw_material_placeholder,
+    quantity_for_part,
     split_path,
     unit_for_part,
     select_only_sheet,
@@ -58,7 +59,7 @@ def build_pdm_bom_upload_rows(
         if not child_part:
             continue
 
-        quantity = float(item.quantity or 0)
+        quantity = quantity_for_part(child_part, item.quantity)
         child_lookup = normalize_part_lookup(child_part)
         row = BomUploadRow(
             parent_part=path_parts[-2],

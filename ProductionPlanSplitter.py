@@ -4,6 +4,7 @@ from copy import copy
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox
+import unicodedata
 
 import pandas as pd
 from openpyxl import Workbook, load_workbook
@@ -250,6 +251,20 @@ def _number(value):
         return 0.0
 
 
+def _excel_text_width(value):
+    """한글 등 전각 문자를 고려한 Excel 열 너비용 표시 길이를 반환한다."""
+    return max(
+        (
+            sum(
+                2 if unicodedata.east_asian_width(char) in {"W", "F", "A"} else 1
+                for char in line
+            )
+            for line in str(value or "").splitlines()
+        ),
+        default=0,
+    )
+
+
 def _selected_rows(ws, value_ws, group: str, plan_columns, shortage_columns):
     headers = build_header_lookup(ws)
     process_col = headers.get("process_print_col")
@@ -437,8 +452,12 @@ def _format_for_print(
         target.column_dimensions[letter].width = width
 
     for row in range(1, target.max_row + 1):
+        target.row_dimensions[row].height = 20
         for col in range(1, target.max_column + 1):
             cell = target.cell(row, col)
+            font = copy(cell.font)
+            font.sz = 12
+            cell.font = font
             cell.alignment = copy(cell.alignment)
             cell.alignment = Alignment(
                 horizontal="center",
@@ -446,11 +465,6 @@ def _format_for_print(
                 wrap_text=True,
                 shrink_to_fit=True,
             )
-
-            if row >= 3 and isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
-                font = copy(cell.font)
-                font.sz = max(float(font.sz or 10), 12)
-                cell.font = font
 
     # 모델명 열은 실제 내용에 맞춰 AutoFit에 가까운 너비를 적용한다.
     model_target_col = col_map.get(model_col)
@@ -502,6 +516,31 @@ def _format_for_print(
         )
         if "실적율" in header_texts or "실적률" in header_texts or has_percent_format:
             target.column_dimensions[get_column_letter(col)].width = 9
+
+    # A, C~E열은 한글 표시 폭을 고려해 AutoFit에 가까운 너비를 적용한다.
+    autofit_cols = [col for col in (1, 3, 4, 5) if col <= target.max_column]
+    for col in autofit_cols:
+        content_width = max(
+            (_excel_text_width(target.cell(row, col).value) for row in range(1, target.max_row + 1)),
+            default=4,
+        )
+        target.column_dimensions[get_column_letter(col)].width = max(
+            content_width + 2, 5
+        )
+
+    # 모델명(A)과 C~E열은 내용이 반드시 한 줄로 보이도록 줄바꿈을 해제한다.
+    for col in (1, 3, 4, 5):
+        if col > target.max_column:
+            continue
+        for row in range(1, target.max_row + 1):
+            cell = target.cell(row, col)
+            alignment = copy(cell.alignment)
+            alignment.wrap_text = False
+            cell.alignment = alignment
+
+    if target.max_column >= 7:
+        target.column_dimensions["G"].width = 6
+
     target.sheet_properties.pageSetUpPr.fitToPage = True
     target.page_setup.orientation = "landscape"
     target.page_setup.fitToWidth = 1
