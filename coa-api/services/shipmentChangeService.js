@@ -1,18 +1,34 @@
 'use strict';
 
+const crypto = require('crypto');
 const shipmentRepository = require('../repositories/shipmentRepository');
 const snapshotService = require('./snapshotService');
+const acknowledgementService = require('./acknowledgementService');
 const { dateOnly, getKoreaDate } = require('./dateService');
 
-async function getChanges() {
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalize(value[key])]));
+  }
+  return value;
+}
+
+function addChangeId(change, baseDate, currentThroughDate) {
+  const identity = canonicalize({ baseDate, currentThroughDate, change });
+  return { ...change, CHANGE_ID: crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex') };
+}
+
+async function getChanges(consumer) {
+  const normalizedConsumer = acknowledgementService.validateConsumer(consumer);
   const currentThroughDate = getKoreaDate(-1);
-  const currentRows = (await shipmentRepository.findThroughDate(currentThroughDate)).map(snapshotService.normalizeRow);
+  const currentRows = (await shipmentRepository.findThroughDate(currentThroughDate))
+    .map(snapshotService.normalizeRow);
   const baseDate = snapshotService.findLatestBefore(currentThroughDate);
 
-  // First run establishes a baseline. Historical change types cannot be inferred without an older snapshot.
   if (!baseDate) {
     if (!snapshotService.load(currentThroughDate)) snapshotService.save(currentThroughDate, currentRows);
-    return buildResponse(currentThroughDate, null, [], [], true);
+    return buildResponse(currentThroughDate, null, normalizedConsumer, [], true);
   }
 
   const snapshot = snapshotService.load(baseDate);
@@ -24,29 +40,33 @@ async function getChanges() {
     })
     .map(row => ({ ...row, CHANGE_TYPE: 'NEW', CHANGED_FIELDS: [], OLD_VALUES: {} }));
   const historicalChanges = snapshotService.compareHistorical(snapshot.rows, historicalRows);
+  const allChanges = [...newRows, ...historicalChanges]
+    .map(change => addChangeId(change, baseDate, currentThroughDate));
+  const acknowledged = acknowledgementService.acknowledgedIds(normalizedConsumer);
+  const pendingChanges = allChanges.filter(change => !acknowledged.has(change.CHANGE_ID));
 
   if (!snapshotService.load(currentThroughDate)) snapshotService.save(currentThroughDate, currentRows);
-  return buildResponse(currentThroughDate, baseDate, newRows, historicalChanges, false);
+  return buildResponse(currentThroughDate, baseDate, normalizedConsumer, pendingChanges, false);
 }
 
-function buildResponse(currentThroughDate, baseDate, newRows, historicalChanges, baselineCreated) {
-  const data = [...newRows, ...historicalChanges];
+function buildResponse(currentThroughDate, baseDate, consumer, data, baselineCreated) {
   return {
     ok: true,
     today: getKoreaDate(0),
     targetDate: currentThroughDate,
     currentThroughDate,
     snapshotBaseDate: baseDate,
+    consumer,
     baselineCreated,
     summary: {
-      newCount: newRows.length,
-      modifiedCount: historicalChanges.filter(x => x.CHANGE_TYPE === 'MODIFIED').length,
-      pastNewCount: historicalChanges.filter(x => x.CHANGE_TYPE === 'PAST_NEW').length,
-      deletedCount: historicalChanges.filter(x => x.CHANGE_TYPE === 'DELETED').length,
+      newCount: data.filter(x => x.CHANGE_TYPE === 'NEW').length,
+      modifiedCount: data.filter(x => x.CHANGE_TYPE === 'MODIFIED').length,
+      pastNewCount: data.filter(x => x.CHANGE_TYPE === 'PAST_NEW').length,
+      deletedCount: data.filter(x => x.CHANGE_TYPE === 'DELETED').length,
       totalCount: data.length
     },
     data
   };
 }
 
-module.exports = { getChanges };
+module.exports = { addChangeId, getChanges };

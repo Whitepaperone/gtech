@@ -1,4 +1,5 @@
 __pycache__/
+.local-python/
 build/
 excel_watch/
 단일파일 버전/
@@ -34,3 +35,4 @@ databases.conf
 .idea/
 Thumbs.db
 desktop.ini
+.local-python/

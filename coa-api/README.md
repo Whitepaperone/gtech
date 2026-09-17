@@ -20,3 +20,8 @@ SNAPSHOT_DIR=shipment_snapshots
 ```
 
 기존 JSON을 이동하기 전에는 운영 서버에서 API 프로세스를 중지하고 백업해야 합니다.
+
+## 변경사항 처리 이력
+
+`PRODUCTION_PLAN`과 `SHIPMENT_DISPOSAL`은 서로 독립적으로 처리 완료 상태를 관리합니다.
+처리 이력은 기본적으로 `data/change_acknowledgements.ndjson`에 저장되며 ERP DB에는 기록하지 않습니다.

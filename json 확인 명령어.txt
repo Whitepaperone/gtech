@@ -1,0 +1,31 @@
+$apiKeyInput = Read-Host "API_KEY 입력" -AsSecureString
+$apiCredential = [PSCredential]::new("api", $apiKeyInput)
+
+$headers = @{
+    Authorization = "Bearer " + $apiCredential.GetNetworkCredential().Password
+}
+$response = Invoke-WebRequest `
+    -Uri "http://177.168.0.170:3000/shipments/changes" `
+    -Headers $headers `
+    -Method Get `
+    -UseBasicParsing
+
+# 서버가 반환한 JSON 본문 확인
+# JSON을 들여쓰기해서 보기
+$prettyJson = $response.Content | ConvertFrom-Json | ConvertTo-Json -Depth 100
+$prettyJson
+
+# 보기 좋게 정리한 내용을 파일로 저장
+$prettyJson | Set-Content -Path ".\orders-pretty$(Get-Date -Format 'yyyyMMdd-HHmmss').json" -Encoding UTF8
+
+# 받은 JSON 본문을 파일로 저장
+$fileName = "orders-response-$(Get-Date -Format 'yyyyMMdd-HHmmss').json"
+[IO.File]::WriteAllText(
+    (Join-Path $PWD $fileName),
+    $response.Content
+)
+
+
+#####api key setting 방법
+cmd창에 
+setx COA_API_KEY "서버와_같은_API_KEY"

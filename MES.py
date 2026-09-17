@@ -257,7 +257,7 @@ def compare_work_orders(
 ) -> pd.DataFrame:
     """계획과 MES 작업지시 수량을 비교한다.
 
-    작일 음수 미달에 의해 완전히 소진되는 오늘 이후 계획은 작업지시가 없는
+    오늘 음수 미달에 의해 완전히 소진되는 오늘 이후 계획은 작업지시가 없는
     것이 정상이다. 실적 흐름과 중복되는 총실적 초과/계획 소진 후 잔존 판정은
     여기서 수행하지 않는다.
     """
@@ -313,7 +313,7 @@ def compare_work_orders(
         )
     )
 
-    # 오늘 미달이 0 이하이면 오늘까지의 미지시 계획은 정상 소멸로 본다.
+    # 오늘 미달은 오늘 계획 반영 전 값이다. 오늘 이후 계획은 전량 소진 여부를 따로 확인한다.
     current_shortages = plan[
         (plan["구분"] == "미달") & (plan["날짜"] == base_date)
     ].groupby(["품번"], as_index=False)["수량"].sum()
@@ -321,11 +321,28 @@ def compare_work_orders(
         row.품번: float(row.수량)
         for row in current_shortages.itertuples(index=False)
     }
-    cleared_groups = {
-        row.품번
-        for row in current_shortages.itertuples(index=False)
-        if float(row.수량) <= 0
-    }
+
+    # 전월부터 어제까지의 MES 작업지시를 오늘 미달과 비교한다.
+    # 오늘 미달은 오늘 계획이 반영되기 전의 누적값이므로 오늘 날짜의
+    # 작업지시/실적은 여기 합계에 넣지 않는다.
+    # MES 실적에는 오늘 뒤늦게 등록한 값이 섞일 수 있으므로 실적이 있으면
+    # 수량에서 차감해 자동 판정하지 않고 수동 확인 대상으로 남긴다.
+    # 전월 작업지시와 이번 달 신규 작업지시가 함께 남아 있는 경우도
+    # 현재 미달 한 번으로 판단할 수 있다.
+    outstanding_totals = {}
+    if shortage_map and not mes.empty:
+        this_month = base_date.replace(day=1)
+        previous_month = this_month - pd.offsets.MonthBegin(1)
+        through_yesterday = mes[
+            (mes["날짜"] >= previous_month) & (mes["날짜"] < base_date)
+        ]
+        totals = through_yesterday.groupby("품번", as_index=False).agg(
+            지시량=("지시량", "sum"), 실적량=("실적량", "sum")
+        )
+        outstanding_totals = {
+            row.품번: (float(row.지시량), float(row.실적량))
+            for row in totals.itertuples(index=False)
+        }
 
     # 양수 미달은 오늘 이전 계획을 최신 날짜부터 역순으로 남긴다.
     positive_shortage_absorbed_keys = set()
@@ -391,9 +408,31 @@ def compare_work_orders(
                 and row.날짜 < base_date
             )
         )
+        outstanding = outstanding_totals.get(row.품번)
+        is_past_mes_only = (
+            row.날짜 < base_date
+            and plan_qty == 0
+            and work_qty != 0
+            and has_current_shortage
+        )
+        has_mes_actual_to_review = (
+            is_past_mes_only
+            and outstanding is not None
+            and abs(outstanding[1]) >= 1e-9
+        )
+        today_shortage_matches = (
+            is_past_mes_only
+            and outstanding is not None
+            and not has_mes_actual_to_review
+            and abs(outstanding[0] - shortage_qty) < 1e-9
+        )
 
         # 1차는 미달/실적을 보지 않고 계획과 MES 작업지시만 비교한다.
-        if plan_qty == work_qty:
+        if has_mes_actual_to_review:
+            first_judge = "MES실적있음_수동확인"
+        elif today_shortage_matches:
+            first_judge = "작업지시일치"
+        elif plan_qty == work_qty:
             first_judge = "작업지시일치"
         elif plan_qty == 0:
             first_judge = "해당날짜_계획없는데작업지시있음"
@@ -405,9 +444,15 @@ def compare_work_orders(
             first_judge = "작업지시과다"
 
         # 1차 불일치인 경우에만 미달과 MES 실적을 적용한다.
-        if first_judge == "작업지시일치" and not should_be_gone:
+        if has_mes_actual_to_review:
+            judge = "MES실적있음_수동확인"
+            detail = "MES 실적 등록시점 수동 확인 필요"
+        elif today_shortage_matches:
+            judge = "작업지시일치"
+            detail = "전월~어제 작업지시 합계가 오늘 미달과 일치"
+        elif first_judge == "작업지시일치" and not should_be_gone:
             judge = first_judge
-            detail = f"계획/작업지시 {plan_qty:g}"
+            detail = ""
         elif should_be_gone and work_qty > 0:
             judge = "작업지시잔존"
             detail = (
@@ -427,30 +472,22 @@ def compare_work_orders(
         elif key in positive_shortage_absorbed_keys and work_qty == 0:
             judge = "작업지시일치"
             detail = f"오늘 양수 미달 {row.미달수량:g}보다 오래된 계획 정상 소멸"
-        elif (
-            plan_qty > 0
-            and work_qty == 0
-            and row.날짜 <= base_date
-                and row.품번 in cleared_groups
-        ):
-            judge = "작업지시일치"
-            detail = f"오늘 미달 0 이하로 계획 {plan_qty:g}의 작업지시 정상 소멸"
         elif plan_qty > 0 and work_qty == 0:
             if actual_qty == plan_qty:
                 judge = "작업지시일치_MES실적대체"
                 detail = f"계획 {plan_qty:g}을 MES실적 {actual_qty:g}으로 충족"
             else:
                 judge = "작업지시없음"
-                detail = f"계획 {plan_qty:g} / 작업지시 0 / MES실적 {actual_qty:g}"
+                detail = ""
         elif first_judge == "작업지시부족":
             judge = first_judge
-            detail = f"계획 {plan_qty:g} / 작업지시 {work_qty:g}"
+            detail = ""
         elif first_judge == "작업지시과다":
             judge = first_judge
-            detail = f"계획 {plan_qty:g} / 작업지시 {work_qty:g}"
+            detail = ""
         else:
             judge = first_judge
-            detail = f"계획 {plan_qty:g} / 작업지시 {work_qty:g} / MES실적 {actual_qty:g}"
+            detail = ""
         first_judgments.append(first_judge)
         judgments.append(judge)
         details.append(detail)
@@ -479,7 +516,7 @@ def save_normalized_results(
         shortage_flow_df.to_excel(writer, sheet_name="3_미달실적흐름", index=False)
         work_order_output = work_order_df[[
             "품번", "작업장명", "작업반명", "날짜", "계획수량",
-            "미달수량", "MES실적수량", "작업지시수량", "판정",
+            "미달수량", "MES실적수량", "작업지시수량", "판정", "상세",
         ]].copy()
         work_order_output["날짜"] = pd.to_datetime(
             work_order_output["날짜"], errors="coerce"

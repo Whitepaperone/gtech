@@ -452,6 +452,8 @@ def map_workcenter_and_team(process_name):
     p_raw = normalize_process_token(process_name)
     p = normalize_process_token(p_raw)
 
+    if "외주품" in p_raw:
+        return "LEAK TEST", "LEAK TEST 외주품"
     if "AL" == p or "AL" in p:
         return "CORE조립", "CORE조립-AL"
     if "CU" == p or "CU" in p:
@@ -488,7 +490,7 @@ def pick_plan_part_no(workshop_name: str, row_values: Dict[str, str]) -> str:
 
     if w == "CORE조립":
         return row_values.get("core_part_no", "")
-    if w in ("용접", "CLINCHING", "TANK조립&LEAKTEST"):
+    if w in ("용접", "CLINCHING", "TANK조립&LEAKTEST", "LEAKTEST"):
         return row_values.get("tank_part_no", "")
     if w == "완성조립":
         return row_values.get("finish_part_no", "")
@@ -561,7 +563,7 @@ def filter_work_order_period(df: pd.DataFrame, start_date=None, end_date=None) -
     if df.empty:
         return df
 
-    date_col = df.columns[8]
+    date_col = "날짜"
     out = df.copy()
     out[date_col] = pd.to_datetime(out[date_col], errors="coerce").dt.normalize()
 
@@ -626,15 +628,14 @@ def build_work_order_upload_df(plan_df: pd.DataFrame) -> pd.DataFrame:
     if plan_df.empty:
         return pd.DataFrame(columns=output_columns)
 
-    cols = list(plan_df.columns)
-    workcenter_col = cols[3]
-    team_col = cols[4]
-    model_col = cols[5]
-    part_col = cols[6]
-    date_col = cols[8]
-    kind_col = cols[9]
-    qty_col = cols[10]
-    process_print_col = cols[11]
+    workcenter_col = "작업장명"
+    team_col = "작업반명"
+    model_col = "모델"
+    part_col = "품번"
+    date_col = "날짜"
+    kind_col = "구분"
+    qty_col = "수량"
+    process_print_col = "공정인쇄"
 
     df = plan_df.copy()
     plan_kind = normalize_kind("계획") or "계획"

@@ -3,7 +3,9 @@
 
 from copy import copy
 from datetime import date, datetime, timedelta
+import getpass
 from pathlib import Path
+import socket
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -11,7 +13,7 @@ from openpyxl import load_workbook
 from openpyxl.formula.translate import Translator
 from openpyxl.styles import PatternFill, Side
 
-from ApiClient import fetch_shipment_changes
+from ApiClient import acknowledge_shipment_changes, fetch_shipment_changes
 from CommonUtils import create_progress_window, normalize_part_no, normalize_process_token
 
 
@@ -493,12 +495,15 @@ def append_shipment_changes_fast(
             return None, False
 
         append_records = []
+        acknowledged_change_ids = []
         marked_modified = marked_deleted = not_found = ambiguous_count = 0
         colors = {"MODIFIED": "FFF2CC", "DELETED": "F4CCCC"}
         for record in records:
             change_type = str(record.get("CHANGE_TYPE") or "NEW").upper()
             if change_type not in colors:
                 append_records.append(record)
+                if record.get("CHANGE_ID"):
+                    acknowledged_change_ids.append(record["CHANGE_ID"])
                 continue
             row_number, ambiguous = find_com_row(record)
             if row_number is None:
@@ -508,6 +513,8 @@ def append_shipment_changes_fast(
             ws.Range(ws.Cells(row_number, 1), ws.Cells(row_number, 31)).Interior.Color = _excel_color(colors[change_type])
             marked_modified += int(change_type == "MODIFIED")
             marked_deleted += int(change_type == "DELETED")
+            if record.get("CHANGE_ID"):
+                acknowledged_change_ids.append(record["CHANGE_ID"])
 
         mapped_count = presale_count = 0
         batch_values = []
@@ -598,6 +605,7 @@ def append_shipment_changes_fast(
             "marked_deleted_count": marked_deleted, "not_found_count": not_found,
             "ambiguous_count": ambiguous_count, "formula_source_found": formula_row > 0,
             "target_sheet": ws.Name,
+            "acknowledged_change_ids": acknowledged_change_ids,
         }
     finally:
         if workbook is not None:
@@ -636,6 +644,7 @@ def main() -> None:
     if production_plan is None:
         return
     target_mode = "production_plan" if production_plan else "shipment_file"
+    consumer = "PRODUCTION_PLAN" if production_plan else "SHIPMENT_DISPOSAL"
 
     if DEFAULT_MAPPING_FILE.is_file():
         mapping_file = DEFAULT_MAPPING_FILE
@@ -664,7 +673,7 @@ def main() -> None:
     progress_win, progress = create_progress_window(root, "출고 변경사항 반영")
     try:
         progress(5, "서버에서 출고 변경 데이터 받는 중...")
-        payload = fetch_shipment_changes()
+        payload = fetch_shipment_changes(consumer)
         progress(15, f"API 데이터 수신 완료: {len(payload['data'])}건")
         result = append_shipment_changes_fast(
             input_file,
@@ -674,6 +683,24 @@ def main() -> None:
             target_mode=target_mode,
             progress=progress,
         )
+        acknowledgement_warning = ""
+        try:
+            acknowledged_count = acknowledge_shipment_changes(
+                consumer,
+                result["acknowledged_change_ids"],
+                metadata={
+                    "operator": getpass.getuser(),
+                    "computer": socket.gethostname(),
+                    "sourceFile": Path(input_file).name,
+                    "outputFile": Path(output_file).name,
+                },
+            )
+        except Exception as exc:
+            acknowledged_count = 0
+            acknowledgement_warning = (
+                "\n\n주의: 엑셀은 저장됐지만 서버 처리 이력 기록에 실패했습니다.\n"
+                f"{exc}"
+            )
         progress(100, "완료")
         progress_win.destroy()
         summary = payload.get("summary") or {}
@@ -690,7 +717,9 @@ def main() -> None:
             f"기존 행 미발견: {result['not_found_count']}건, "
             f"중복 후보: {result['ambiguous_count']}건\n"
             f"선매출 표시: {result['presale_count']}건"
-            f"{'\n주의: 통합문서에서 AD·AE 원본 수식을 찾지 못했습니다.' if not result['formula_source_found'] else ''}",
+            f"\n서버 처리 완료 기록: {acknowledged_count}건"
+            f"{'\n주의: 통합문서에서 AD·AE 원본 수식을 찾지 못했습니다.' if not result['formula_source_found'] else ''}"
+            f"{acknowledgement_warning}",
             parent=root,
         )
     except Exception as exc:

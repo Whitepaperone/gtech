@@ -19,6 +19,7 @@ const config = {
   rateLimitWindowMs: positiveInteger('RATE_LIMIT_WINDOW_MS', 60_000),
   rateLimitMax: positiveInteger('RATE_LIMIT_MAX', 100),
   snapshotDir: path.resolve(__dirname, '..', snapshotSetting),
+  ackLogFile: path.resolve(__dirname, '..', process.env.ACK_LOG_FILE || 'data/change_acknowledgements.ndjson'),
   database: {
     host: process.env.FIREBIRD_HOST || '127.0.0.1',
     port: positiveInteger('FIREBIRD_PORT', 3050),
