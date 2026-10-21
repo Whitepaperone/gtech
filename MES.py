@@ -4,7 +4,7 @@ from tkinter import messagebox
 
 import pandas as pd
 
-from AppConstants import MES_OUTPUT_FILE, MES_SHEET_CONFIG, WORKSHOP_TO_PROCESS
+from AppConstants import MES_OUTPUT_FILE, MES_SHEET_CONFIG, WORKSHOP_TO_PROCESS, get_plan_extraction_config
 from CommonUtils import (
     create_progress_window, filter_by_period, normalize_part_no,
     normalize_process_token, select_date_range, select_excel_file,
@@ -41,7 +41,9 @@ def extract_plan_all(plan_file: str, progress=None) -> pd.DataFrame:
         if progress:
             progress(20 + int((i - 1) / total * 25), f"{sheet_name} 데이터 추출 중...")
         frame = extract_plan_sheet_from_module(
-            worksheets[sheet_name], config, check_red_font=False,
+            worksheets[sheet_name],
+            {**config, **get_plan_extraction_config("MES", sheet_name)},
+            check_red_font=False,
             progress=lambda pct, text, i=i: progress(
                 20 + int(((i - 1) + pct / 100) / total * 25), text
             ) if progress else None,

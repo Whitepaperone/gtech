@@ -16,6 +16,7 @@ from CommonUtils import (
     select_excel_save_file,
 )
 from ExtractPlan import extract_plan_sheet, load_calamine_worksheets
+from AppConstants import get_plan_extraction_config
 
 
 PLAN_SHEETS = (
@@ -46,7 +47,11 @@ def extract_mrp_source(file_path, sheet_name, default_process, **config_override
     worksheets = load_calamine_worksheets(file_path, [sheet_name])
     if sheet_name not in worksheets:
         raise RuntimeError(f"{Path(file_path).name}: {sheet_name} 시트가 없습니다.")
-    config = {"default_process": default_process, **config_overrides}
+    config = {
+        "default_process": default_process,
+        **get_plan_extraction_config("mrp_ver2", sheet_name),
+        **config_overrides,
+    }
     return extract_plan_sheet(worksheets[sheet_name], config)
 
 

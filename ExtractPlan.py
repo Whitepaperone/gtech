@@ -711,6 +711,38 @@ def build_work_order_upload_df(plan_df: pd.DataFrame) -> pd.DataFrame:
     return wide.reset_index(drop=True)
 
 
+def parse_excluded_rows(specs):
+    """개별 행 번호 및 양 끝을 포함한 '35:40' 범위를 해석한다."""
+    if specs is None:
+        return set()
+    if isinstance(specs, (str, int)):
+        specs = [specs]
+
+    def index(value):
+        text = str(value).strip().upper()
+        if text.isascii() and text.isdigit():
+            number = int(text)
+        else:
+            raise ValueError(f"잘못된 제외 행 설정: {value!r}")
+        if not 1 <= number <= 1048576:
+            raise ValueError(f"제외 번호가 엑셀 범위를 벗어났습니다: {value!r}")
+        return number
+
+    excluded = set()
+    for spec in specs:
+        parts = str(spec).replace("-", ":").split(":")
+        if len(parts) == 1:
+            excluded.add(index(parts[0]))
+        elif len(parts) == 2:
+            start, end = map(index, parts)
+            if start > end:
+                raise ValueError(f"제외 범위의 시작이 끝보다 큽니다: {spec!r}")
+            excluded.update(range(start, end + 1))
+        else:
+            raise ValueError(f"잘못된 제외 범위: {spec!r}")
+    return excluded
+
+
 def _extract_plan_sheet(
     ws,
     mode: str,
@@ -721,6 +753,7 @@ def _extract_plan_sheet(
 ) -> pd.DataFrame:
     is_mes = mode == "mes"
     config = config or {}
+    excluded_rows = parse_excluded_rows(config.get("excluded_rows"))
     merged_map = build_merged_map(ws)
     date_cols = date_columns if date_columns is not None else (
         build_mes_date_columns(ws) if is_mes else build_plan_date_columns(ws)
@@ -802,6 +835,9 @@ def _extract_plan_sheet(
                 continue
 
         if "제외" in first_col_text:
+            continue
+
+        if r in excluded_rows:
             continue
 
         process_name_raw = ""
