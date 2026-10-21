@@ -50,6 +50,8 @@ API_FIELD_BY_HEADER = {
     "인도장소": "OUTLOCATION",
     "창고": "LOCATIONNAME",
     "비고": "REMARK",
+    "입력방법": "BASETYPE",
+    "근거번호": "SALESCODE",
 }
 CHANGE_FILLS = {
     "MODIFIED": PatternFill("solid", fgColor="FFF2CC"),
@@ -203,6 +205,45 @@ def _is_presale(record: dict) -> bool:
     return "선매출" in str(record.get("REMARK") or "") or zero_price
 
 
+def _write_excel_values(ws, first_row, batch_values, header_columns, progress=None):
+    """혼합형 배열 전달 대신 명시적인 셀 주소에 스칼라 값을 기록한다."""
+    for offset, values in enumerate(batch_values):
+        if progress:
+            progress(65 + int(15 * offset / len(batch_values)),
+                     f"출고 데이터 입력 중: {offset + 1}/{len(batch_values)}건")
+        for column in header_columns.values():
+            cell = ws.Cells(first_row + offset, column)
+            value = values[column - 1]
+            # ERP 문자열을 날짜/수식으로 자동 변환하지 않도록 보존한다.
+            if isinstance(value, str):
+                cell.NumberFormat = "@"
+            cell.Value2 = value
+        if progress and (offset % 20 == 0 or offset == len(batch_values) - 1):
+            progress(65 + int(15 * (offset + 1) / len(batch_values)),
+                     f"출고 데이터 입력 중: {offset + 1}/{len(batch_values)}건")
+
+
+def _verify_excel_values(ws, first_row, batch_values, header_columns):
+    """입력값 불일치는 경고로 반환하고 파일 저장은 허용한다."""
+    warnings = []
+    for header, column in header_columns.items():
+        actual_rows = ws.Range(
+            ws.Cells(first_row, column),
+            ws.Cells(first_row + len(batch_values) - 1, column),
+        ).Value2
+        if len(batch_values) == 1:
+            actual_rows = ((actual_rows,),)
+        for offset, (actual,) in enumerate(actual_rows):
+            expected = batch_values[offset][column - 1]
+            if actual == expected or (actual in (None, "") and expected in (None, "")):
+                continue
+            warnings.append(
+                f"{first_row + offset}행 '{header}' "
+                f"(예상 {expected!r}, 실제 {actual!r})"
+            )
+    return warnings
+
+
 def find_existing_change_row(
     ws,
     header_row: int,
@@ -221,7 +262,7 @@ def find_existing_change_row(
     original_part = normalize_part_no(original("ITEMCODE"))
     expected = {
         "출고번호": _comparable(original("SALESCODE")),
-        "근거번호": _comparable(original("BASETYPE")[1]),
+        "근거번호": _comparable(original("SALESCODE")),
         "품번": _comparable(part_mapping.get(original_part, original_part)),
         "날짜": _comparable(original("DDAY")),
         "수량": _comparable(original("QTY")),
@@ -333,8 +374,6 @@ def append_shipment_changes(
                     value = 0
                 ws.cell(target_row, header_columns[header], value)
 
-            ws.cell(target_row, header_columns["입력방법"], record.get("BASETYPE"),)
-            ws.cell(target_row, header_columns["근거번호"], record.get("SALESCODE"))
             return_value = record.get("RSQTY") if presale else record.get("RETURNQTY")
             return_cell = ws.cell(target_row, header_columns["반품/선매출고"], return_value)
 
@@ -403,6 +442,7 @@ def append_shipment_changes_fast(
 
     excel = None
     workbook = None
+    original_calculation = None
     try:
         if progress:
             progress(20, "Excel 실행 준비 중...")
@@ -414,6 +454,10 @@ def append_shipment_changes_fast(
         if progress:
             progress(30, "선택한 Excel 파일 여는 중...")
         workbook = excel.Workbooks.Open(str(Path(input_file).resolve()), UpdateLinks=0)
+        # 생산계획의 SUMIF/VLOOKUP 등이 셀을 쓸 때마다 재계산되지 않게 한다.
+        # 이 작업 전용 Excel 인스턴스이며 저장 전에 기존 모드로 복원한다.
+        original_calculation = excel.Calculation
+        excel.Calculation = -4135  # xlCalculationManual
         if target_mode == "shipment_file":
             ws = workbook.Worksheets(1)
         else:
@@ -470,7 +514,7 @@ def append_shipment_changes_fast(
             part = normalize_part_no(original("ITEMCODE"))
             expected = {
                 "출고번호": _comparable(original("SALESCODE")),
-                "근거번호": _comparable(original("BASETYPE")[1]),
+                "근거번호": _comparable(original("SALESCODE")),
                 "품번": _comparable(part_mapping.get(part, part)),
                 "날짜": _comparable(original("DDAY")),
                 "수량": _comparable(original("QTY")),
@@ -540,8 +584,6 @@ def append_shipment_changes_fast(
                 elif header == "출고량" and presale:
                     value = 0
                 row_values[header_columns[header] - 1] = value
-            row_values[header_columns["입력방법"] - 1] = record.get("BASETYPE")
-            row_values[header_columns["근거번호"] - 1] = record.get("SALESCODE")
             row_values[header_columns["반품/선매출고"] - 1] = (
                 record.get("RSQTY") if presale else record.get("RETURNQTY")
             )
@@ -550,17 +592,12 @@ def append_shipment_changes_fast(
             row_markers.append((target_row, change_type, presale))
             presale_count += int(presale)
 
+        validation_warnings = []
         if append_records:
             first_target_row = last_data_row + 1
             last_target_row = last_data_row + len(append_records)
             if progress:
-                progress(65, f"출고 데이터 {len(append_records)}건 일괄 입력 중...")
-
-            # 한 행씩 COM에 전달하지 않고 전체 표를 한 번에 기록한다.
-            ws.Range(
-                ws.Cells(first_target_row, 1),
-                ws.Cells(last_target_row, data_last_column),
-            ).Value = tuple(batch_values)
+                progress(62, f"출고 데이터 {len(append_records)}건 서식·수식 준비 중...")
 
             if formula_row:
                 formula_ws.Range(
@@ -577,6 +614,8 @@ def append_shipment_changes_fast(
                             ws.Cells(last_target_row, column),
                         ).FormulaR1C1 = formula
 
+            _write_excel_values(ws, first_target_row, batch_values, header_columns, progress)
+
             all_new_rows = ws.Range(
                 ws.Cells(first_target_row, 1), ws.Cells(last_target_row, 31)
             )
@@ -591,11 +630,21 @@ def append_shipment_changes_fast(
                     ws.Range(ws.Cells(target_row, 1), ws.Cells(target_row, 31)).Interior.Color = _excel_color("DDEBF7")
                 if presale:
                     ws.Range(ws.Cells(target_row, 1), ws.Cells(target_row, 31)).Interior.Color = _excel_color(PRESALE_COLOR)
+            try:
+                validation_warnings = _verify_excel_values(
+                    ws, first_target_row, batch_values, header_columns
+                )
+            except Exception as exc:
+                validation_warnings = [f"입력값 확인 중 오류: {exc}"]
             if progress:
                 progress(85, f"출고 데이터 추가 완료: {len(append_records)}건")
 
         output_path = str(Path(output_file).resolve())
         file_format = 52 if Path(output_file).suffix.lower() == ".xlsm" else 51
+        if progress:
+            progress(88, "입력 완료: 생산계획 수식 계산 및 계산 모드 복원 중...")
+        # 자동 계산 모드 복원 시 누적된 변경을 한 번에 계산한다.
+        excel.Calculation = original_calculation
         if progress:
             progress(90, "결과 Excel 파일 저장 중...")
         workbook.SaveAs(output_path, FileFormat=file_format)
@@ -606,6 +655,7 @@ def append_shipment_changes_fast(
             "ambiguous_count": ambiguous_count, "formula_source_found": formula_row > 0,
             "target_sheet": ws.Name,
             "acknowledged_change_ids": acknowledged_change_ids,
+            "validation_warnings": validation_warnings,
         }
     finally:
         if workbook is not None:
@@ -704,6 +754,14 @@ def main() -> None:
         progress(100, "완료")
         progress_win.destroy()
         summary = payload.get("summary") or {}
+        validation_warnings = result.get("validation_warnings", [])
+        validation_message = ""
+        if validation_warnings:
+            validation_message = (
+                f"\n\n주의: 입력값 확인 경고 {len(validation_warnings)}건이 있으나 파일은 저장했습니다.\n"
+                + "\n".join(validation_warnings[:5])
+                + ("\n(나머지 경고 생략)" if len(validation_warnings) > 5 else "")
+            )
         messagebox.showinfo(
             "완료",
             f"결과 저장 완료: {output_file}\n"
@@ -719,7 +777,8 @@ def main() -> None:
             f"선매출 표시: {result['presale_count']}건"
             f"\n서버 처리 완료 기록: {acknowledged_count}건"
             f"{'\n주의: 통합문서에서 AD·AE 원본 수식을 찾지 못했습니다.' if not result['formula_source_found'] else ''}"
-            f"{acknowledgement_warning}",
+            f"{acknowledgement_warning}"
+            f"{validation_message}",
             parent=root,
         )
     except Exception as exc:
