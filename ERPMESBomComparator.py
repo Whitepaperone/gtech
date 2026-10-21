@@ -31,7 +31,8 @@ def text(value):
 
 
 def part_key(value):
-    return text(value).split('-', 1)[0].strip()
+    # 품번 본체의 하이픈과 OP1 등 다른 접미사는 보존한다.
+    return re.sub(r'-\s*(?:무광|유광|\(\s*(?:무광|유광)\s*\))\s*$', '', text(value)).strip()
 
 
 def is_outsourcing_cost(value):
@@ -185,7 +186,7 @@ def compare(erp_path, mes_path, output_path, erp_sheet=None, mes_sheet=None):
             for row in [
                 ['항목', '내용'], ['ERP 파일', str(erp_path)], ['ERP 시트', erp.title],
                 ['MES 파일', str(mes_path)], ['MES 시트', mes.title],
-                ['비교 기준', '양쪽 0레벨 제외. 나머지 품번은 첫 - 포함 뒷부분 제거 후 비교. 원본 품번 유지.'],
+                ['비교 기준', '양쪽 0레벨 제외. 끝의 -무광, -(무광), -유광, -(유광)만 제거 후 비교. 품번 본체의 하이픈과 -OP1은 유지.'],
                 ['외주비 제외', '-(외주비)가 붙은 품번은 양쪽 비교/수량 합산에서 제외하고 ERP 결과 행에서도 삭제.'],
                 ['수량 기준', '같은 비교 품번의 수량/소요량 단순 합산. 상위 수량은 곱하지 않음.'],
                 ['색상', '초록: 수량 일치 / 주황: 수량 불일치 / 노랑: 수량 확인 필요 / 무색: MES 미구성'],
@@ -238,7 +239,7 @@ def gui():
         ttk.Button(root, text='파일 선택', command=lambda k=kind: choose(k)).grid(row=index * 2, column=2, padx=12)
         combos[kind] = ttk.Combobox(root, textvariable=sheets[kind], state='readonly')
         combos[kind].grid(row=index * 2 + 1, column=1, sticky='ew')
-    ttk.Label(root, text='0레벨 제외 · -(외주비) 품번 제외 · 첫 - 이후 제거 · 같은 품번 수량 합산\n초록: 일치 / 주황: 수량 불일치 / 무색: MES 미구성\n수량은 엑셀 값 그대로 합산합니다. 상위 수량을 곱하지 않습니다.\n지원 파일: .xlsx, .xlsm (.xls는 Excel에서 .xlsx로 저장 후 선택)', justify='left').grid(row=4, column=0, columnspan=3, padx=12, pady=18, sticky='w')
+    ttk.Label(root, text='0레벨 제외 · -(외주비) 품번 제외 · 끝의 무광/유광 접미사만 제거\n초록: 일치 / 주황: 수량 불일치 / 무색: MES 미구성\n수량은 엑셀 값 그대로 합산합니다. 상위 수량을 곱하지 않습니다.\n지원 파일: .xlsx, .xlsm (.xls는 Excel에서 .xlsx로 저장 후 선택)', justify='left').grid(row=4, column=0, columnspan=3, padx=12, pady=18, sticky='w')
     status = tk.StringVar(value='ERP와 MES 파일 및 비교할 시트를 선택하세요.')
     messages = queue.Queue()
 
