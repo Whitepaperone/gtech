@@ -39,6 +39,35 @@ class ShipmentTests(unittest.TestCase):
         with patch.object(app, 'append_shipment_changes', app.append_shipment_changes_fast):
             self.test_group_rows_and_audit_retry()
 
+    def test_formula_and_format_boundaries(self):
+        from openpyxl.styles import PatternFill
+        for writer in (app.append_shipment_changes, app.append_shipment_changes_fast):
+            with self.subTest(writer=writer.__name__), tempfile.TemporaryDirectory() as folder:
+                source, output = Path(folder)/'source.xlsx', Path(folder)/'output.xlsx'
+                wb = Workbook()
+                ws = wb.active
+                ws.title = app.TARGET_SHEET
+                ws.append(app.REQUIRED_HEADERS)
+                values = {'DDAY': date(2026, 1, 1), 'SALESCODE': 'S1', 'ITEMCODE': 'P1', 'QTY': 5}
+                ws.append([values.get(app.API_FIELD_BY_HEADER.get(header)) for header in app.REQUIRED_HEADERS])
+                ws['AD2'] = '=IFERROR(VLOOKUP(D2,$A$10:$B$12,2,FALSE),0)'
+                ws['AE2'] = '=D2&"-suffix"'
+                for row in (2, 3):
+                    for column in range(32, 41):
+                        ws.cell(row, column).fill = PatternFill('solid', fgColor='FF0000')
+                ws['AN3'] = 'keep'
+                wb.save(source)
+                wb.close()
+                writer(str(source), str(output), [dict(DDAY='2026-01-02', SALESCODE='S2', ITEMCODE='P2', QTY=7, CHANGE_TYPE='NEW', CHANGE_ID='c'*64)])
+                wb = load_workbook(output)
+                ws = wb[app.TARGET_SHEET]
+                self.assertEqual(ws['AD3'].value, '=IFERROR(VLOOKUP(D3,$A$10:$B$12,2,FALSE),0)')
+                self.assertEqual(ws['AE3'].value, '=D3&"-suffix"')
+                self.assertIsNone(ws['AF3'].fill.patternType)
+                self.assertEqual(ws['AN3'].value, 'keep')
+                self.assertEqual(ws['AN3'].fill.fgColor.rgb[-6:], 'FF0000')
+                wb.close()
+
 if __name__ == '__main__':
     unittest.main()
 

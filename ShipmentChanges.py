@@ -181,6 +181,22 @@ def _remove_bottom_border(ws, row_number: int) -> None:
         cell.border = border
 
 
+def _translated_formulas(formula, column, source_row, first_row, last_row):
+    """A1 수식을 행별로 이동하여 D열 등의 상대 참조를 유지한다."""
+    letter = "AD" if column == 30 else "AE"
+    translator = Translator(formula, origin=f"{letter}{source_row}")
+    return tuple((translator.translate_formula(f"{letter}{row}"),)
+                 for row in range(first_row, last_row + 1))
+
+
+def _clear_empty_extra_formats(ws, first_row, last_row):
+    """새로 입력한 행의 빈 AF:AN 셀에만 기본 서식을 적용한다."""
+    for row in ws.iter_rows(min_row=first_row, max_row=last_row, min_col=32, max_col=40):
+        for cell in row:
+            if cell.value is None:
+                cell._style = None
+
+
 def _comparable(value) -> str:
     if value is None:
         return ""
@@ -465,6 +481,8 @@ def append_shipment_changes(
         for row_number in range(last_data_row + 1, last_data_row + len(append_records)):
             _remove_bottom_border(ws, row_number)
 
+        if append_records:
+            _clear_empty_extra_formats(ws, last_data_row + 1, last_data_row + len(append_records))
         workbook.save(output_file)
         return {
             "added_count": len(append_records),
@@ -526,6 +544,8 @@ def append_shipment_changes_fast(
         excel.DisplayAlerts = False
         excel.ScreenUpdating = False
         excel.EnableEvents = False
+        # Excel의 목록 서식 자동 확장으로 AF:AN까지 서식이 번지는 것을 막는다.
+        excel.ExtendList = False
         if progress:
             progress(30, "선택한 Excel 파일 여는 중...")
         workbook = excel.Workbooks.Open(str(Path(input_file).resolve()), UpdateLinks=0)
@@ -657,14 +677,25 @@ def append_shipment_changes_fast(
                     ws.Cells(first_target_row, 1), ws.Cells(last_target_row, 31)
                 ).PasteSpecial(-4122)  # xlPasteFormats
                 for column in (30, 31):
-                    formula = formula_ws.Cells(formula_row, column).FormulaR1C1
+                    formula = formula_ws.Cells(formula_row, column).Formula
                     if isinstance(formula, str) and formula.startswith("="):
                         ws.Range(
                             ws.Cells(first_target_row, column),
                             ws.Cells(last_target_row, column),
-                        ).FormulaR1C1 = formula
+                        ).Formula = _translated_formulas(
+                            formula, column, formula_row, first_target_row, last_target_row
+                        )
 
             _write_excel_values(ws, first_target_row, batch_values, header_columns, progress)
+
+            extra = ws.Range(ws.Cells(first_target_row, 32), ws.Cells(last_target_row, 40))
+            # 빈 셀만 정리하고 기존 값과 수식이 있는 셀은 유지한다.
+            try:
+                blank_cells = extra.SpecialCells(4)  # xlCellTypeBlanks
+            except Exception:
+                blank_cells = None
+            if blank_cells is not None:
+                blank_cells.ClearFormats()
 
             all_new_rows = ws.Range(
                 ws.Cells(first_target_row, 1), ws.Cells(last_target_row, 31)
