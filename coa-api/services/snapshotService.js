@@ -6,12 +6,6 @@ const config = require('../config');
 const { dateOnly } = require('./dateService');
 
 const FILE_PATTERN = /^shipment_(\d{4}-\d{2}-\d{2})\.json$/;
-const COMPARE_FIELDS = [
-  'DDAY', 'SALESCODE', 'ITEMCODE', 'ITEMNAME', 'DESCRIPTION',
-  'QTY', 'RETURNQTY', 'RSQTY', 'UNIT', 'UNITPRICE', 'STAX',
-  'CUSTOMERCODE', 'CUSTOMERNAME', 'OUTLOCATION', 'LOCATIONNAME',
-  'REMARK', 'BASETYPE'
-];
 
 function ensureDirectory(directory = config.snapshotDir) {
   fs.mkdirSync(directory, { recursive: true });
@@ -65,33 +59,40 @@ function load(date, directory = config.snapshotDir) {
 }
 
 function shipmentKey(row) {
-  if (row.IINDEX === null || row.IINDEX === undefined) throw new Error('Shipment row has no IINDEX');
-  return String(row.IINDEX);
+  return JSON.stringify([dateOnly(row.DDAY), String(row.SALESCODE ?? '').trim(), String(row.ITEMCODE ?? '').trim()]);
+}
+
+function groupRows(rows) {
+  const groups = new Map();
+  for (const raw of rows) {
+    const row = normalizeRow(raw);
+    const key = shipmentKey(row);
+    if (!groups.has(key)) groups.set(key, { ...row, QTY: 0, SOURCE_ROWS: [] });
+    const group = groups.get(key);
+    const quantity = Number(row.QTY ?? 0);
+    if (!Number.isFinite(quantity)) throw new Error('Invalid shipment quantity');
+    group.QTY += quantity;
+    group.SOURCE_ROWS.push(row);
+  }
+  return groups;
 }
 
 function compareHistorical(snapshotRows, currentRows) {
-  const oldMap = new Map(snapshotRows.map(row => [shipmentKey(row), normalizeRow(row)]));
-  const currentMap = new Map();
+  const oldMap = groupRows(snapshotRows);
+  const currentMap = groupRows(currentRows);
   const changes = [];
-
-  for (const rawRow of currentRows) {
-    const row = normalizeRow(rawRow);
-    const key = shipmentKey(row);
-    currentMap.set(key, row);
-    const oldRow = oldMap.get(key);
-    if (!oldRow) {
-      changes.push({ ...row, CHANGE_TYPE: 'PAST_NEW', CHANGED_FIELDS: [], OLD_VALUES: {} });
-      continue;
-    }
-    const changedFields = COMPARE_FIELDS.filter(field => String(oldRow[field] ?? '') !== String(row[field] ?? ''));
-    if (changedFields.length) {
-      const oldValues = Object.fromEntries(changedFields.map(field => [field, oldRow[field] ?? null]));
-      changes.push({ ...row, CHANGE_TYPE: 'MODIFIED', CHANGED_FIELDS: changedFields, OLD_VALUES: oldValues });
-    }
+  for (const [key, row] of currentMap) {
+    const old = oldMap.get(key);
+    if (old && Math.abs(old.QTY - row.QTY) < 1e-9) continue;
+    changes.push({ ...row, CHANGE_TYPE: old ? 'MODIFIED' : 'PAST_NEW',
+      CHANGED_FIELDS: old ? ['QTY'] : [], OLD_VALUES: old ? { QTY: old.QTY } : {},
+      OLD_TOTAL_QTY: old ? old.QTY : 0, NEW_TOTAL_QTY: row.QTY,
+      GROUP_COMPARISON: true });
   }
-
-  for (const [key, oldRow] of oldMap) {
-    if (!currentMap.has(key)) changes.push({ ...oldRow, CHANGE_TYPE: 'DELETED', CHANGED_FIELDS: [], OLD_VALUES: {} });
+  for (const [key, old] of oldMap) {
+    if (!currentMap.has(key)) changes.push({ ...old, CHANGE_TYPE: 'DELETED',
+      CHANGED_FIELDS: [], OLD_VALUES: {}, OLD_TOTAL_QTY: old.QTY,
+      NEW_TOTAL_QTY: 0, GROUP_COMPARISON: true });
   }
   return changes;
 }

@@ -244,6 +244,78 @@ def _verify_excel_values(ws, first_row, batch_values, header_columns):
     return warnings
 
 
+AUDIT_SHEET = "출고변경내역"
+AUDIT_HEADERS = ["변경ID", "감지시각", "변경유형", "날짜", "출고번호", "품번", "이전합계", "현재합계", "증감", "기존행표시"]
+
+
+def _expand_new_groups(records):
+    expanded = []
+    for record in records:
+        if record.get("SOURCE_ROWS") and record.get("CHANGE_TYPE") in {"NEW", "PAST_NEW"}:
+            expanded.extend({**row, "CHANGE_TYPE": record["CHANGE_TYPE"],
+                             "CHANGE_ID": record.get("CHANGE_ID")} for row in record["SOURCE_ROWS"])
+        else:
+            expanded.append(record)
+    return expanded
+
+
+def _group_matches(values, first_row, columns, record, mapping):
+    old = record.get("OLD_VALUES") or {}
+    original = lambda field: old.get(field, record.get(field))
+    part = normalize_part_no(original("ITEMCODE"))
+    expected = {"날짜": _comparable(original("DDAY")),
+                "출고번호": _comparable(original("SALESCODE")),
+                "품번": _comparable(mapping.get(part, part))}
+    return [number for number, row in enumerate(values, first_row)
+            if all(_comparable(row[columns[key] - 1]) == value for key, value in expected.items())]
+
+
+def _audit_values(record, matched):
+    old = record.get("OLD_TOTAL_QTY", (record.get("OLD_VALUES") or {}).get("QTY", record.get("QTY", 0)))
+    new = record.get("NEW_TOTAL_QTY", 0 if record.get("CHANGE_TYPE") == "DELETED" else record.get("QTY", 0))
+    return [record.get("CHANGE_ID"), record.get("DETECTED_AT"), record.get("CHANGE_TYPE"),
+            str(record.get("DDAY") or "")[:10], record.get("SALESCODE"), record.get("ITEMCODE"),
+            old, new, float(new or 0) - float(old or 0),
+            f"{matched}행 표시" if matched else "기존 행 없음 (내역 기록)"]
+
+
+def _audit_openpyxl(workbook, records, counts):
+    ws = workbook[AUDIT_SHEET] if AUDIT_SHEET in workbook.sheetnames else workbook.create_sheet(AUDIT_SHEET)
+    if ws.cell(1, 1).value != AUDIT_HEADERS[0]:
+        for column, header in enumerate(AUDIT_HEADERS, 1):
+            ws.cell(1, column, header)
+    known = {ws.cell(row, 1).value for row in range(2, ws.max_row + 1)}
+    for record, count in zip(records, counts):
+        if record.get("CHANGE_ID") and record["CHANGE_ID"] in known:
+            continue
+        ws.append(_audit_values(record, count))
+        known.add(record.get("CHANGE_ID"))
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    for column in "ABCDEFGHIJ":
+        ws.column_dimensions[column].width = 22 if column != "A" else 68
+
+
+def _audit_com(workbook, records, counts):
+    try:
+        ws = workbook.Worksheets(AUDIT_SHEET)
+    except Exception:
+        ws = workbook.Worksheets.Add(After=workbook.Worksheets(workbook.Worksheets.Count))
+        ws.Name = AUDIT_SHEET
+    ws.Range(ws.Cells(1, 1), ws.Cells(1, len(AUDIT_HEADERS))).Value = (tuple(AUDIT_HEADERS),)
+    last = ws.Cells(ws.Rows.Count, 1).End(-4162).Row
+    known = {str(ws.Cells(row, 1).Value or "") for row in range(2, last + 1)}
+    for record, count in zip(records, counts):
+        change_id = record.get("CHANGE_ID")
+        if change_id and change_id in known:
+            continue
+        last += 1
+        ws.Range(ws.Cells(last, 1), ws.Cells(last, len(AUDIT_HEADERS))).Value = (tuple(_audit_values(record, count)),)
+        known.add(change_id)
+    ws.Columns("A:A").ColumnWidth = 68
+    ws.Columns("B:J").ColumnWidth = 22
+
+
 def find_existing_change_row(
     ws,
     header_row: int,
@@ -321,26 +393,29 @@ def append_shipment_changes(
         ambiguous_count = 0
         append_records = []
 
-        for record in records:
+        known_ids = set()
+        if AUDIT_SHEET in workbook.sheetnames:
+            audit = workbook[AUDIT_SHEET]
+            known_ids = {audit.cell(row, 1).value for row in range(2, audit.max_row + 1)}
+        records = [record for record in records if not record.get("CHANGE_ID") or record["CHANGE_ID"] not in known_ids]
+        audit_records = records
+        audit_counts = []
+        values = list(ws.iter_rows(min_row=header_row + 1, max_row=max(header_row + 1, last_data_row), max_col=max(header_columns.values()), values_only=True))
+        for record in audit_records:
+            rows = _group_matches(values, header_row + 1, header_columns, record, part_mapping)
+            audit_counts.append(len(rows))
             change_type = str(record.get("CHANGE_TYPE") or "NEW").upper()
             if change_type not in {"MODIFIED", "DELETED"}:
-                append_records.append(record)
                 continue
-
-            existing_row, ambiguous = find_existing_change_row(
-                ws, header_row, last_data_row, header_columns, record, part_mapping
-            )
-            if existing_row is None:
-                ambiguous_count += int(ambiguous)
-                not_found_count += int(not ambiguous)
-                continue
-            fill = CHANGE_FILLS[change_type]
-            for column in range(1, 32):
-                ws.cell(existing_row, column).fill = copy(fill)
-            if change_type == "MODIFIED":
-                marked_modified_count += 1
-            else:
-                marked_deleted_count += 1
+            if not rows:
+                not_found_count += 1
+            for row_number in rows:
+                for column in range(1, 32):
+                    ws.cell(row_number, column).fill = copy(CHANGE_FILLS[change_type])
+            marked_modified_count += len(rows) if change_type == "MODIFIED" else 0
+            marked_deleted_count += len(rows) if change_type == "DELETED" else 0
+        _audit_openpyxl(workbook, audit_records, audit_counts)
+        append_records = [r for r in _expand_new_groups(records) if r.get("CHANGE_TYPE") not in {"MODIFIED", "DELETED"}]
 
         for offset, record in enumerate(append_records, start=1):
             target_row = last_data_row + offset
@@ -507,58 +582,33 @@ def append_shipment_changes_fast(
             ws.Cells(best_row + 1, 1), ws.Cells(max(last_data_row, best_row + 1), 64)
         ).Value
 
-        def find_com_row(record):
-            old = record.get("OLD_VALUES")
-            old = old if isinstance(old, dict) else {}
-            original = lambda field: old.get(field, record.get(field))
-            part = normalize_part_no(original("ITEMCODE"))
-            expected = {
-                "출고번호": _comparable(original("SALESCODE")),
-                "근거번호": _comparable(original("SALESCODE")),
-                "품번": _comparable(part_mapping.get(part, part)),
-                "날짜": _comparable(original("DDAY")),
-                "수량": _comparable(original("QTY")),
-            }
-            orders = [
-                ("출고번호", "근거번호", "품번"),
-                ("출고번호", "품번", "날짜", "수량"),
-                ("근거번호", "품번", "날짜", "수량"),
-                ("출고번호", "근거번호"),
-            ]
-            for keys in orders:
-                if any(not expected[key] for key in keys):
-                    continue
-                matches = []
-                for offset, row in enumerate(existing_values, start=best_row + 1):
-                    if all(_comparable(row[header_columns[key] - 1]) == expected[key] for key in keys):
-                        matches.append(offset)
-                if len(matches) == 1:
-                    return matches[0], False
-                if len(matches) > 1:
-                    return None, True
-            return None, False
-
-        append_records = []
-        acknowledged_change_ids = []
+        known_ids = set()
+        try:
+            audit = workbook.Worksheets(AUDIT_SHEET)
+            audit_last = audit.Cells(audit.Rows.Count, 1).End(-4162).Row
+            known_ids = {str(audit.Cells(row, 1).Value or "") for row in range(2, audit_last + 1)}
+        except Exception:
+            pass
+        acknowledged_change_ids = [record["CHANGE_ID"] for record in records if record.get("CHANGE_ID") in known_ids]
+        records = [record for record in records if not record.get("CHANGE_ID") or record["CHANGE_ID"] not in known_ids]
         marked_modified = marked_deleted = not_found = ambiguous_count = 0
         colors = {"MODIFIED": "FFF2CC", "DELETED": "F4CCCC"}
+        audit_counts = []
         for record in records:
             change_type = str(record.get("CHANGE_TYPE") or "NEW").upper()
-            if change_type not in colors:
-                append_records.append(record)
-                if record.get("CHANGE_ID"):
-                    acknowledged_change_ids.append(record["CHANGE_ID"])
-                continue
-            row_number, ambiguous = find_com_row(record)
-            if row_number is None:
-                ambiguous_count += int(ambiguous)
-                not_found += int(not ambiguous)
-                continue
-            ws.Range(ws.Cells(row_number, 1), ws.Cells(row_number, 31)).Interior.Color = _excel_color(colors[change_type])
-            marked_modified += int(change_type == "MODIFIED")
-            marked_deleted += int(change_type == "DELETED")
+            rows = _group_matches(existing_values, best_row + 1, header_columns, record, part_mapping)
+            audit_counts.append(len(rows))
+            if change_type in colors:
+                if not rows:
+                    not_found += 1
+                for row_number in rows:
+                    ws.Range(ws.Cells(row_number, 1), ws.Cells(row_number, 31)).Interior.Color = _excel_color(colors[change_type])
+                marked_modified += len(rows) if change_type == "MODIFIED" else 0
+                marked_deleted += len(rows) if change_type == "DELETED" else 0
             if record.get("CHANGE_ID"):
                 acknowledged_change_ids.append(record["CHANGE_ID"])
+        _audit_com(workbook, records, audit_counts)
+        append_records = [r for r in _expand_new_groups(records) if r.get("CHANGE_TYPE") not in {"MODIFIED", "DELETED"}]
 
         mapped_count = presale_count = 0
         batch_values = []

@@ -24,28 +24,28 @@ async function getChanges(consumer) {
   const currentThroughDate = getKoreaDate(-1);
   const currentRows = (await shipmentRepository.findThroughDate(currentThroughDate))
     .map(snapshotService.normalizeRow);
-  const baseDate = snapshotService.findLatestBefore(currentThroughDate);
-
+  // Include today's stored snapshot so repeated calls detect changes since the last successful poll.
+  const baseDate = snapshotService.listSnapshotDates().filter(date => date <= currentThroughDate).at(-1) || null;
+  const journal = require('./changeJournalService');
   if (!baseDate) {
-    if (!snapshotService.load(currentThroughDate)) snapshotService.save(currentThroughDate, currentRows);
-    return buildResponse(currentThroughDate, null, normalizedConsumer, [], true);
+    snapshotService.save(currentThroughDate, currentRows);
+    return buildResponse(currentThroughDate, null, normalizedConsumer,
+      journal.pending(normalizedConsumer), true);
   }
-
   const snapshot = snapshotService.load(baseDate);
-  const historicalRows = currentRows.filter(row => dateOnly(row.DDAY) <= baseDate);
-  const newRows = currentRows
-    .filter(row => {
-      const date = dateOnly(row.DDAY);
-      return date && date > baseDate && date <= currentThroughDate;
-    })
-    .map(row => ({ ...row, CHANGE_TYPE: 'NEW', CHANGED_FIELDS: [], OLD_VALUES: {} }));
-  const historicalChanges = snapshotService.compareHistorical(snapshot.rows, historicalRows);
-  const allChanges = [...newRows, ...historicalChanges]
-    .map(change => addChangeId(change, baseDate, currentThroughDate));
-  const acknowledged = acknowledgementService.acknowledgedIds(normalizedConsumer);
-  const pendingChanges = allChanges.filter(change => !acknowledged.has(change.CHANGE_ID));
+  const currentHash = crypto.createHash('sha256').update(JSON.stringify(currentRows)).digest('hex');
+  const changes = snapshotService.compareHistorical(snapshot.rows, currentRows).map(change => {
+    if (change.CHANGE_TYPE === 'PAST_NEW' && dateOnly(change.DDAY) > baseDate) {
+      change.CHANGE_TYPE = 'NEW';
+    }
+    return addChangeId(change, snapshot.createdAt || baseDate,
+      currentHash);
+  });
+  // Persist events before advancing the snapshot; a failed save can safely be retried.
+  journal.append(changes);
+  snapshotService.save(currentThroughDate, currentRows);
+  const pendingChanges = journal.pending(normalizedConsumer);
 
-  if (!snapshotService.load(currentThroughDate)) snapshotService.save(currentThroughDate, currentRows);
   return buildResponse(currentThroughDate, baseDate, normalizedConsumer, pendingChanges, false);
 }
 
